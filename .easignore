@@ -1,0 +1,12 @@
+node_modules
+android/.gradle
+android/app/build
+android/build
+android/.idea
+android/hs_err_pid*.log
+android/replay_pid*.log
+hs_err_pid*.log
+replay_pid*.log
+.expo
+fix_*.bat
+fix_*.ps1
