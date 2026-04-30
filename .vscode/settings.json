@@ -1,0 +1,5 @@
+{
+  "deno.enable": false,
+  "java.compile.nullAnalysis.mode": "automatic",
+  "java.configuration.updateBuildConfiguration": "automatic"
+}
