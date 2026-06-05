@@ -17,7 +17,7 @@
     },
     "android": {
       "package": "com.crewcore.app",
-      "versionCode": 6,
+      "versionCode": 7,
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#ffffff"
@@ -47,8 +47,7 @@
         {
           "android": {
             "compileSdkVersion": 35,
-            "targetSdkVersion": 35,
-            "buildToolsVersion": "35.0.0"
+            "targetSdkVersion": 35
           }
         }
       ]
