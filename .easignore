@@ -4,6 +4,5 @@ ios
 .expo
 fix_*.bat
 fix_*.ps1
-*.keystore
 store-assets
 PRIVACY_POLICY_TEMPLATE.md
