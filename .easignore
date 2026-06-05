@@ -1,12 +1,9 @@
 node_modules
-android/.gradle
-android/app/build
-android/build
-android/.idea
-android/hs_err_pid*.log
-android/replay_pid*.log
-hs_err_pid*.log
-replay_pid*.log
+android
+ios
 .expo
 fix_*.bat
 fix_*.ps1
+*.keystore
+store-assets
+PRIVACY_POLICY_TEMPLATE.md
