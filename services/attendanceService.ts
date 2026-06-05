@@ -19,7 +19,7 @@ export async function fetchMyMonthAttendance(profileId: string, year: number, mo
 export async function fetchMyMonthStats(profileId: string, year: number, month: number) {
   const startDate = `${year}-${String(month + 1).padStart(2, '0')}-01`;
   const endDay = new Date(year, month + 1, 0).getDate();
-  const endDate = `${year}-${String(month + 1).padStart(2, '00')}-${endDay}`;
+  const endDate = `${year}-${String(month + 1).padStart(2, '0')}-${endDay}`;
 
   const { data, error } = await supabase
     .from('attendance')
@@ -121,10 +121,10 @@ export async function clockOut(profileId: string, locationData: { lat: number; l
     .select('min_half_day_hours, min_full_day_hours')
     .eq('id', att.tenant_id)
     .single();
-  const halfMin = tenantData?.min_half_day_hours || 4;
+  const halfMin = tenantData?.min_half_day_hours || 1;
   const fullMin = tenantData?.min_full_day_hours || 8;
 
-  const status = total >= fullMin ? 'Present' : total > 0 ? 'Half Day' : 'Absent';
+  const status = total >= fullMin ? 'Present' : total > halfMin ? 'Half Day' : 'Absent';
 
   await supabase
     .from('attendance')

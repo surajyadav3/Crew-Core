@@ -1,5 +1,5 @@
 # This script sets the JAVA_HOME environment variable for the current user.
-$JAVA_PATH = "C:\Program Files\Android\Android Studio\jbr"
+$JAVA_PATH = "C:\Users\SURAJ YADAV\.jdks\corretto-17.0.16"
 
 if (Test-Path $JAVA_PATH) {
     Write-Host "Setting JAVA_HOME to $JAVA_PATH..." -ForegroundColor Cyan

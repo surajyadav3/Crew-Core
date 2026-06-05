@@ -27,7 +27,7 @@
         <category android:name="android.intent.category.DEFAULT"/>
         <category android:name="android.intent.category.BROWSABLE"/>
         <data android:scheme="crew-core"/>
-        <data android:scheme="com.surajyadav.crewcore"/>
+        <data android:scheme="com.crewcore.app"/>
         <data android:scheme="exp+crew-core"/>
       </intent-filter>
     </activity>

@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useEffect, useState, useCallback, useMemo } from 'react';
 import { supabase } from '@/lib/supabase';
 import { sendOtp as svcSendOtp, verifyOtp as svcVerifyOtp } from '@/services/otpService';
+import { useNotification } from '@/lib/notifications';
 
 type Profile = {
   id: string;
@@ -114,6 +115,34 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     return () => { mounted = false; subscription.unsubscribe(); };
   }, [fetchProfile]);
+
+  const { notify } = useNotification();
+
+  // Listen for leave status changes and show in-app notification
+  useEffect(() => {
+    if (!profile?.id) return;
+
+    const channel = supabase
+      .channel(`leave-status-${profile.id}`)
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'leave_requests', filter: `profile_id=eq.${profile.id}` },
+        (payload) => {
+          const newStatus = payload.new?.status;
+          const oldStatus = payload.old?.status;
+          if (!newStatus || newStatus === oldStatus) return;
+          const leaveType = payload.new?.leave_type || 'Leave';
+          if (newStatus === 'Approved') {
+            notify('Leave Approved ✅', `Your ${leaveType} request has been approved.`, 'success');
+          } else if (newStatus === 'Rejected') {
+            notify('Leave Rejected ❌', `Your ${leaveType} request was not approved.`, 'error');
+          }
+        },
+      )
+      .subscribe();
+
+    return () => { supabase.removeChannel(channel); };
+  }, [profile?.id, notify]);
 
   const signIn = useCallback(async (email: string, password: string) => {
     const { data, error } = await supabase.auth.signInWithPassword({ email, password });

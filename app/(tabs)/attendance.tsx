@@ -1,3 +1,4 @@
+
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity, ActivityIndicator,
@@ -15,6 +16,7 @@ import { showToast } from '@/components/Toast';
 import {
   todayStr, dateStr, timeStr, fmtTime12, diffHours, fmtDuration, monthLabel, calculateDistance,
 } from '@/lib/helpers';
+import { useNotification } from '@/lib/notifications';
 
 const C = {
   primary: '#00AEEF',
@@ -40,12 +42,13 @@ const STATUS_COLORS: Record<string, string> = {
 
 export default function AttendanceScreen() {
   const { profile, tenant } = useAuth();
+  const { notify } = useNotification();
   const [attMonth, setAttMonth] = useState(new Date().getMonth());
   const [attYear, setAttYear] = useState(new Date().getFullYear());
   const [myRecords, setMyRecords] = useState<any[]>([]);
   const [myPunches, setMyPunches] = useState<any>({});
   const [isClockedIn, setIsClockedIn] = useState(false);
-  const [locationStatus, setLocationStatus] = useState('Checking location…');
+  const [locationStatus, setLocationStatus] = useState('Loading…');
   const [liveClock, setLiveClock] = useState('');
   const [liveDate, setLiveDate] = useState('');
   const [timerDisplay, setTimerDisplay] = useState('00:00:00');
@@ -110,16 +113,28 @@ export default function AttendanceScreen() {
     return () => { if (timerRef.current) clearInterval(timerRef.current); };
   }, [myPunches]);
 
-  const checkGeofence = useCallback(async (): Promise<{ lat: number; lng: number } | false> => {
+  // Set location status label once tenant is loaded
+  useEffect(() => {
+    if (!tenant) return;
+    setLocationStatus(
+      tenant.geofence_lat && tenant.geofence_lng
+        ? 'Tap clock in to verify location'
+        : 'Geofencing not configured',
+    );
+  }, [tenant]);
+
+  // Returns { loc, msg } — loc is null when blocked, { lat:0, lng:0 } when geofencing disabled
+  const checkGeofence = useCallback(async (): Promise<{ loc: { lat: number; lng: number } | null; msg: string }> => {
     if (!tenant?.geofence_lat || !tenant?.geofence_lng) {
-      setLocationStatus('Geofencing not enabled');
-      return { lat: 0, lng: 0 };
+      setLocationStatus('Geofencing not configured');
+      return { loc: { lat: 0, lng: 0 }, msg: 'Geofencing not configured' };
     }
 
     const { status } = await Location.requestForegroundPermissionsAsync();
     if (status !== 'granted') {
-      setLocationStatus('Location permission denied');
-      return false;
+      const msg = 'Location permission denied';
+      setLocationStatus(msg);
+      return { loc: null, msg };
     }
 
     try {
@@ -130,14 +145,16 @@ export default function AttendanceScreen() {
       );
       const radius = tenant.geofence_radius || 200;
       if (dist > radius) {
-        setLocationStatus(`Outside area (${Math.round(dist)}m away)`);
-        return false;
+        const msg = `Outside office area (${Math.round(dist)}m away)`;
+        setLocationStatus(msg);
+        return { loc: null, msg };
       }
       setLocationStatus('Within office area ✓');
-      return { lat: pos.coords.latitude, lng: pos.coords.longitude };
-    } catch (err) {
-      setLocationStatus('Location access required');
-      return false;
+      return { loc: { lat: pos.coords.latitude, lng: pos.coords.longitude }, msg: 'Within office area ✓' };
+    } catch {
+      const msg = 'Unable to get location — check GPS';
+      setLocationStatus(msg);
+      return { loc: null, msg };
     }
   }, [tenant]);
 
@@ -145,11 +162,13 @@ export default function AttendanceScreen() {
     if (!profile || !tenant) { showToast('Account setup incomplete.', 'error'); return; }
     if (isClockedIn) { showToast('Already clocked in!', 'warning'); return; }
     setActionLoading(true);
-    const location = await checkGeofence();
-    if (location === false) { showToast(locationStatus, 'error'); setActionLoading(false); return; }
+    const { loc, msg } = await checkGeofence();
+    if (loc === null) { showToast(msg, 'error'); setActionLoading(false); return; }
     try {
-      await svcClockIn(tenant.id, profile.id, tenant, location.lat !== 0 ? location : null);
-      showToast(`Clocked in at ${fmtTime12(timeStr(new Date()))}`, 'success');
+      await svcClockIn(tenant.id, profile.id, tenant, loc.lat !== 0 ? loc : null);
+      const inTime = fmtTime12(timeStr(new Date()));
+      showToast(`Clocked in at ${inTime}`, 'success');
+      notify('Clocked In ✓', `You clocked in at ${inTime}`, 'success');
       fetchData();
     } catch (err: any) {
       showToast('Clock in failed: ' + err.message, 'error');
@@ -161,11 +180,13 @@ export default function AttendanceScreen() {
   const handleClockOut = async () => {
     if (!isClockedIn) { showToast('Not clocked in!', 'warning'); return; }
     setActionLoading(true);
-    const location = await checkGeofence();
-    if (location === false) { showToast(locationStatus, 'error'); setActionLoading(false); return; }
+    const { loc, msg } = await checkGeofence();
+    if (loc === null) { showToast(msg, 'error'); setActionLoading(false); return; }
     try {
-      const { total } = await svcClockOut(profile!.id, location.lat !== 0 ? location : null);
-      showToast(`Clocked out. Worked ${fmtDuration(total)}`, 'success');
+      const { total } = await svcClockOut(profile!.id, loc.lat !== 0 ? loc : null);
+      const worked = fmtDuration(total);
+      showToast(`Clocked out. Worked ${worked}`, 'success');
+      notify('Clocked Out', `You worked ${worked} today.`, 'info');
       fetchData();
     } catch (err: any) {
       showToast('Clock out failed: ' + err.message, 'error');
@@ -257,24 +278,27 @@ export default function AttendanceScreen() {
         {/* Clock widget */}
         <View style={s.clockWidget}>
           <View style={s.clockTop}>
-            <View>
+            <View style={s.clockInfo}>
               <Text style={s.clockTime}>{liveClock}</Text>
-              <Text style={s.clockDate}>{liveDate}</Text>
+              <Text style={s.clockDate} numberOfLines={1}>{liveDate}</Text>
               <View style={s.clockStatus}>
                 <View style={[s.pulse, { backgroundColor: isClockedIn ? '#4ADE80' : '#94A3B8' }]} />
                 <Text style={s.clockStatusText}>
                   {isClockedIn ? 'Currently Working' : myPunches?.punches?.length ? 'Clocked Out' : 'Not Clocked In'}
                 </Text>
               </View>
-              <Text style={s.locationText}>
-                <Ionicons name="location-outline" size={11} color="rgba(255,255,255,0.6)" /> {locationStatus}
-              </Text>
+              <View style={s.locationRow}>
+                <Ionicons name="location-outline" size={11} color="rgba(255,255,255,0.5)" />
+                <Text style={s.locationText} numberOfLines={1}>{locationStatus}</Text>
+              </View>
             </View>
             <View style={s.timerWrap}>
-              <Text style={s.timerText}>{timerDisplay}</Text>
               <Text style={s.timerLabel}>Today's Hours</Text>
+              <Text style={s.timerText}>{timerDisplay}</Text>
             </View>
           </View>
+
+          <View style={s.divider} />
 
           <View style={s.clockBtns}>
             <TouchableOpacity
@@ -377,16 +401,22 @@ const s = StyleSheet.create({
     backgroundColor: '#0F172A', padding: 20,
     shadowColor: '#000', shadowOpacity: 0.2, shadowRadius: 16, elevation: 8,
   },
-  clockTop: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 },
-  clockTime: { fontSize: 20, fontWeight: '800', color: '#fff', letterSpacing: 1 },
-  clockDate: { fontSize: 12, color: 'rgba(255,255,255,0.6)', marginTop: 4 },
-  clockStatus: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 8 },
+  clockTop: { flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 16 },
+  clockInfo: { flex: 1 },
+  clockTime: { fontSize: 22, fontWeight: '800', color: '#fff', letterSpacing: 0.5 },
+  clockDate: { fontSize: 12, color: 'rgba(255,255,255,0.55)', marginTop: 3 },
+  clockStatus: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 10 },
   pulse: { width: 8, height: 8, borderRadius: 4 },
-  clockStatusText: { fontSize: 12, color: 'rgba(255,255,255,0.8)', fontWeight: '600' },
-  locationText: { fontSize: 11, color: 'rgba(255,255,255,0.5)', marginTop: 6 },
-  timerWrap: { alignItems: 'center' },
-  timerText: { fontSize: 24, fontWeight: '800', color: '#fff', fontVariant: ['tabular-nums'] },
-  timerLabel: { fontSize: 10, color: 'rgba(255,255,255,0.5)', marginTop: 4 },
+  clockStatusText: { fontSize: 12, color: 'rgba(255,255,255,0.85)', fontWeight: '600' },
+  locationRow: { flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 5 },
+  locationText: { fontSize: 11, color: 'rgba(255,255,255,0.5)', flexShrink: 1 },
+  timerWrap: {
+    alignItems: 'center', backgroundColor: 'rgba(255,255,255,0.08)',
+    borderRadius: 14, paddingVertical: 10, paddingHorizontal: 14, flexShrink: 0,
+  },
+  timerText: { fontSize: 20, fontWeight: '800', color: '#fff', fontVariant: ['tabular-nums'], marginTop: 4 },
+  timerLabel: { fontSize: 10, color: 'rgba(255,255,255,0.5)', fontWeight: '500', textTransform: 'uppercase', letterSpacing: 0.5 },
+  divider: { height: 1, backgroundColor: 'rgba(255,255,255,0.08)', marginBottom: 16 },
   clockBtns: { flexDirection: 'row', gap: 12 },
   clockBtn: {
     flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
@@ -412,8 +442,8 @@ const s = StyleSheet.create({
   cardHeader: {
     flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14,
   },
-  cardTitle: { fontSize: 15, fontWeight: '700', color: C.text },
-  monthNav: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  cardTitle: { fontSize: 15, fontWeight: '700', color: C.text, flex: 1 },
+  monthNav: { flexDirection: 'row', alignItems: 'center', gap: 8, flexShrink: 0 },
   navBtn: { padding: 4 },
   monthLabel: { fontSize: 13, color: C.text, fontWeight: '600', minWidth: 100, textAlign: 'center' },
   calendar: { flexDirection: 'row', flexWrap: 'wrap' },

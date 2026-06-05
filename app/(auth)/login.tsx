@@ -76,10 +76,6 @@ export default function LoginScreen() {
     try {
       await signIn(email, password);
     } catch (err: any) {
-      console.log('[LOGIN ERROR]', JSON.stringify(err, null, 2));
-      console.log('[LOGIN ERROR] message:', err.message);
-      console.log('[LOGIN ERROR] status:', err.status);
-      console.log('[LOGIN ERROR] code:', err.code);
       setError(err.message || 'Invalid email or password.');
     } finally {
       setSubmitting(false);
