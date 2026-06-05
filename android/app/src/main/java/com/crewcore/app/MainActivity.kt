@@ -1,4 +1,4 @@
-package com.surajyadav.crewcore
+package com.crewcore.app
 
 import android.os.Build
 import android.os.Bundle
