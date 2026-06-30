@@ -8,17 +8,7 @@ import { useRouter } from 'expo-router';
 import { useAuth } from '@/context/AuthContext';
 import { supabase } from '@/lib/supabase';
 import { showToast } from '@/components/Toast';
-
-const C = {
-  primary: '#00AEEF',
-  bg: '#F0F9FF',
-  surface: '#FFFFFF',
-  text: '#1E293B',
-  muted: '#94A3B8',
-  border: '#E2E8F0',
-  success: '#22C55E',
-  danger: '#EF4444',
-};
+import { RegisterColors as C } from '@/constants/Colors';
 
 export default function RegisterScreen() {
   const { user, refreshProfile, signOut } = useAuth();

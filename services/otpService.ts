@@ -1,7 +1,5 @@
 import { supabase } from '@/lib/supabase';
 
-const ANON_KEY = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY?.trim() || '';
-
 export function detectIdentifierType(identifier: string): 'email' | 'phone' | null {
   const id = (identifier || '').trim();
   if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(id)) return 'email';
@@ -15,61 +13,80 @@ export async function sendOtp(identifier: string): Promise<{ type: string; ident
   if (!type) throw new Error('Please enter a valid email address.');
   if (type !== 'email') throw new Error('Phone OTP is not supported. Please use email.');
 
-  const { data, error } = await supabase.functions.invoke('send-otp', {
-    body: { identifier: id, type: 'email' },
-    headers: { Authorization: `Bearer ${ANON_KEY}` },
+  const { error } = await supabase.auth.signInWithOtp({
+    email: id,
+    options: { shouldCreateUser: false },
   });
 
   if (error) {
-    let msg = error.message;
-    try {
-      const body = await (error as any).context?.json();
-      msg = body?.error || body?.message || msg;
-    } catch (_) {}
-    throw new Error(msg);
+    const msg = error.message?.toLowerCase() ?? '';
+    if (
+      msg.includes('not found') ||
+      msg.includes('signup') ||
+      msg.includes('user not found') ||
+      msg.includes('invalid email')
+    ) {
+      throw new Error('No account found with this email. Please contact your admin.');
+    }
+    throw new Error(error.message || 'Failed to send OTP. Please try again.');
   }
 
   return { type: 'email', identifier: id };
 }
 
-export async function verifyOtp(identifier: string, token: string, isSignup = false, password?: string, firstName?: string, lastName?: string) {
-  const requestBody: Record<string, unknown> = { identifier, otp: token, isSignup };
+export async function verifyOtp(
+  identifier: string,
+  token: string,
+  isSignup = false,
+  password?: string,
+  firstName?: string,
+  lastName?: string,
+) {
   if (isSignup) {
-    if (password) requestBody.password = password;
-    if (firstName) requestBody.firstName = firstName;
-    if (lastName) requestBody.lastName = lastName;
+    const ANON_KEY = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY?.trim() || '';
+    const { data, error } = await supabase.functions.invoke('verify-otp', {
+      body: { identifier, otp: token, isSignup, password, firstName, lastName },
+      headers: { Authorization: `Bearer ${ANON_KEY}` },
+    });
+
+    if (error) {
+      let msg = error.message;
+      try {
+        const body = await (error as any).context?.json();
+        msg = body?.error || body?.message || msg;
+      } catch (_) {}
+      throw new Error(msg || 'OTP verification failed.');
+    }
+
+    if (data?.token_hash) {
+      const { data: authData, error: authError } = await supabase.auth.verifyOtp({
+        token_hash: data.token_hash,
+        type: 'magiclink',
+      });
+      if (authError) throw new Error(`Session login failed: ${authError.message}`);
+      return authData;
+    }
+
+    return data;
   }
 
-  const { data, error } = await supabase.functions.invoke('verify-otp', {
-    body: requestBody,
-    headers: { Authorization: `Bearer ${ANON_KEY}` },
+  // Login: verify 6-digit OTP using Supabase native auth
+  const { data, error } = await supabase.auth.verifyOtp({
+    email: identifier,
+    token,
+    type: 'email',
   });
 
   if (error) {
-    let msg = error.message;
-    try {
-      const body = await (error as any).context?.json();
-      if (body?.error) msg = body.error;
-      else if (body?.message) msg = body.message;
-    } catch (_) {}
-    throw new Error(msg || 'OTP verification failed.');
+    const msg = error.message?.toLowerCase() ?? '';
+    if (msg.includes('expired') || msg.includes('otp_expired')) {
+      throw new Error('OTP has expired. Please request a new one.');
+    }
+    if (msg.includes('invalid') || msg.includes('otp_invalid')) {
+      throw new Error('Invalid OTP. Please check and try again.');
+    }
+    throw new Error(error.message || 'OTP verification failed.');
   }
 
-  if (data?.usePasswordLogin && password) {
-    const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
-      email: identifier,
-      password,
-    });
-    if (authError) throw new Error(`Sign-in failed: ${authError.message}`);
-    return authData;
-  }
-
-  if (!data?.token_hash) throw new Error('Verification failed: no session token returned.');
-
-  const { data: authData, error: authError } = await supabase.auth.verifyOtp({
-    token_hash: data.token_hash,
-    type: 'magiclink',
-  });
-  if (authError) throw new Error(`Session login failed: ${authError.message}`);
-  return authData;
+  return data;
 }

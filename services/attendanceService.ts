@@ -1,5 +1,6 @@
 import { supabase } from '@/lib/supabase';
 import { todayStr, timeStr, diffHours } from '@/lib/helpers';
+import { getOrCreateQuota, determineApproverRole, incrementSelfCount } from './requestQuotaService';
 
 export async function fetchMyMonthAttendance(profileId: string, year: number, month: number) {
   const startDate = `${year}-${String(month + 1).padStart(2, '0')}-01`;
@@ -82,6 +83,48 @@ export async function clockIn(tenantId: string, profileId: string, tenant: any, 
     .from('punches')
     .insert([{ attendance_id: attId, punch_time: timeStr(new Date()), punch_type: 'in' }]);
   if (punchErr) throw punchErr;
+}
+
+export async function submitRegularizeRequest(
+  tenantId: string,
+  profileId: string,
+  { date, clockInTime, clockOutTime, reason }: { date: string; clockInTime: string; clockOutTime: string; reason: string }
+) {
+  const quota = await getOrCreateQuota(tenantId, profileId);
+  const tier = determineApproverRole(quota);
+
+  const payload = {
+    tenant_id: tenantId,
+    profile_id: profileId,
+    date,
+    clock_in_time: clockInTime || null,
+    clock_out_time: clockOutTime || null,
+    reason,
+    status: tier === 'self' ? 'Approved' : 'Pending',
+    required_approver_role: tier,
+    approval_level: tier === 'self' ? 'self' : null,
+  };
+
+  if (tier === 'self') {
+    await incrementSelfCount(tenantId, profileId);
+  }
+
+  const { data, error } = await supabase
+    .from('regularize_requests')
+    .insert([payload])
+    .select()
+    .single();
+  return { data, error, tier };
+}
+
+export async function listMyRegularizeRequests(profileId: string) {
+  const { data, error } = await supabase
+    .from('regularize_requests')
+    .select('*')
+    .eq('profile_id', profileId)
+    .order('created_at', { ascending: false })
+    .limit(30);
+  return { data: data || [], error };
 }
 
 export async function clockOut(profileId: string, locationData: { lat: number; lng: number } | null = null) {

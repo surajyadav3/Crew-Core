@@ -20,45 +20,69 @@ serve(async (req) => {
     const { identifier, type } = await req.json()
     if (!identifier) throw new Error('Identifier is required')
 
-    // 1. Generate 6-digit OTP
+    // 1. Validate user exists in profiles table
+    const { data: profile, error: profileError } = await supabase
+      .from('profiles')
+      .select('id, email')
+      .eq('email', identifier)
+      .maybeSingle()
+
+    if (profileError) throw profileError
+    if (!profile) {
+      return new Response(
+        JSON.stringify({ error: 'No account found with this email. Please contact your admin.' }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 404 }
+      )
+    }
+
+    // 2. Generate 6-digit OTP
     const otp = Math.floor(100000 + Math.random() * 900000).toString()
 
-    // 2. Store in database
+    // 3. Store in database (upsert by email)
     const { error: dbError } = await supabase
       .from('otp_table')
-      .upsert({ 
-        user_id: identifier, 
-        otp, 
-        expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString() 
+      .upsert({
+        user_id: identifier,
+        otp,
+        expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
       }, { onConflict: 'user_id' })
 
     if (dbError) throw dbError
 
-    // 3. Send Email via Resend or SMTP
-    // For this implementation, we assume SMTP or a similar service is configured in Supabase Secrets
-    // But since the user mentioned "Nodemailer", they likely expect an email to be sent.
-    // We'll use a placeholder for the actual email sending logic or use a simple console log
-    // and instruct the user to configure their SMTP/Email service.
-    
-    console.log(`Sending OTP ${otp} to ${identifier}`)
-    
-    // NOTE: In a real implementation, you would use an API like Resend or a Deno SMTP library here.
-    // Example with Resend:
-    /*
-    const res = await fetch('https://api.resend.com/emails', {
+    // 4. Send email via Resend
+    const resendKey = Deno.env.get('RESEND_API_KEY')
+    if (!resendKey) {
+      console.error('RESEND_API_KEY is not set — OTP will not be delivered.')
+      throw new Error('Email service is not configured. Please contact your admin.')
+    }
+
+    const emailRes = await fetch('https://api.resend.com/emails', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${Deno.env.get('RESEND_API_KEY')}`,
+        'Authorization': `Bearer ${resendKey}`,
       },
       body: JSON.stringify({
-        from: 'CrewCore <onboarding@resend.dev>',
+        from: 'CrewCore <noreply@crewcore.app>',
         to: identifier,
-        subject: 'Your Verification Code',
-        html: `<strong>Your code is: ${otp}</strong>`,
+        subject: 'Your CrewCore Login Code',
+        html: `
+          <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto;">
+            <h2 style="color: #0B1F3A;">Your Login Code</h2>
+            <p style="color: #475569;">Use the code below to sign in to CrewCore. It expires in 10 minutes.</p>
+            <div style="background: #F0F9FF; border-radius: 12px; padding: 24px; text-align: center; margin: 24px 0;">
+              <span style="font-size: 36px; font-weight: 800; letter-spacing: 8px; color: #00AEEF;">${otp}</span>
+            </div>
+            <p style="color: #94A3B8; font-size: 13px;">If you didn't request this, you can safely ignore this email.</p>
+          </div>
+        `,
       }),
     })
-    */
+
+    if (!emailRes.ok) {
+      const emailError = await emailRes.json().catch(() => ({}))
+      throw new Error(emailError?.message || `Email send failed: ${emailRes.status}`)
+    }
 
     return new Response(
       JSON.stringify({ message: 'OTP sent successfully', identifier }),

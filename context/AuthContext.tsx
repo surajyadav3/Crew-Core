@@ -90,27 +90,36 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           setUser(session.user);
           await fetchProfile(session.user.id);
         }
+      } catch (err) {
+        console.error('[CrewCore] Auth init error:', err);
       } finally {
         clearTimeout(timeoutId);
         if (mounted) setLoading(false);
       }
     };
 
-    init();
+    init().catch((err) => console.error('[CrewCore] Auth init unhandled:', err));
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
       if (!mounted) return;
-      if (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED') {
-        if (session?.user) {
-          setUser(session.user);
-          setTimeout(async () => { if (mounted) await fetchProfile(session.user.id); }, 300);
+      try {
+        if (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED') {
+          if (session?.user) {
+            setUser(session.user);
+            setTimeout(() => {
+              if (mounted) fetchProfile(session.user.id).catch((e) => console.error('[CrewCore] fetchProfile error:', e));
+            }, 300);
+          }
+        } else if (event === 'SIGNED_OUT') {
+          setUser(null);
+          setProfile(null);
+          setTenant(null);
         }
-      } else if (event === 'SIGNED_OUT') {
-        setUser(null);
-        setProfile(null);
-        setTenant(null);
+      } catch (err) {
+        console.error('[CrewCore] Auth state change error:', err);
+      } finally {
+        if (mounted) setLoading(false);
       }
-      if (mounted) setLoading(false);
     });
 
     return () => { mounted = false; subscription.unsubscribe(); };

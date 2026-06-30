@@ -1,11 +1,12 @@
-
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import {
-  View, Text, ScrollView, StyleSheet, TouchableOpacity, ActivityIndicator,
+  View, Text, ScrollView, StyleSheet, TouchableOpacity, ActivityIndicator, Animated, Easing,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import * as Location from 'expo-location';
+import * as StoreReview from 'expo-store-review';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useAuth } from '@/context/AuthContext';
 import {
   fetchMyMonthAttendance,
@@ -14,22 +15,23 @@ import {
 } from '@/services/attendanceService';
 import { showToast } from '@/components/Toast';
 import {
-  todayStr, dateStr, timeStr, fmtTime12, diffHours, fmtDuration, monthLabel, calculateDistance,
+  todayStr, dateStr, timeStr, fmtTime12, diffHours, fmtDuration, monthLabel,
+  calculateDistance, fmtLiveClock, fmtLiveDate,
 } from '@/lib/helpers';
 import { useNotification } from '@/lib/notifications';
 
-const C = {
-  primary: '#00AEEF',
-  bg: '#F8FAFC',
-  surface: '#FFFFFF',
-  text: '#1E293B',
-  muted: '#94A3B8',
-  border: '#E2E8F0',
-  success: '#22C55E',
-  danger: '#EF4444',
-  warning: '#F59E0B',
-  purple: '#8B5CF6',
-};
+import { Colors as C } from '@/constants/Colors';
+
+const CLOCK_OUT_COUNT_KEY = 'clock_out_count';
+
+async function maybeAskReview() {
+  try {
+    const raw = await AsyncStorage.getItem(CLOCK_OUT_COUNT_KEY);
+    const count = parseInt(raw || '0', 10) + 1;
+    await AsyncStorage.setItem(CLOCK_OUT_COUNT_KEY, String(count));
+    if (count === 3 && await StoreReview.hasAction()) await StoreReview.requestReview();
+  } catch {}
+}
 
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const STATUS_COLORS: Record<string, string> = {
@@ -39,6 +41,38 @@ const STATUS_COLORS: Record<string, string> = {
   Absent: C.danger,
   Leave: C.purple,
 };
+
+// ── Live clock pulse ──────────────────────────────────────────────────────────
+function StatusPulse({ active }: { active: boolean }) {
+  const scale = useRef(new Animated.Value(1)).current;
+  useEffect(() => {
+    if (!active) return;
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(scale, { toValue: 1.8, duration: 800, useNativeDriver: true }),
+        Animated.timing(scale, { toValue: 1, duration: 800, useNativeDriver: true }),
+      ])
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [active]);
+
+  return (
+    <View style={{ width: 14, height: 14, alignItems: 'center', justifyContent: 'center' }}>
+      <Animated.View style={{
+        position: 'absolute',
+        width: 14, height: 14, borderRadius: 7,
+        backgroundColor: active ? C.success : C.muted,
+        opacity: 0.3,
+        transform: [{ scale }],
+      }} />
+      <View style={{
+        width: 8, height: 8, borderRadius: 4,
+        backgroundColor: active ? C.success : C.muted,
+      }} />
+    </View>
+  );
+}
 
 export default function AttendanceScreen() {
   const { profile, tenant } = useAuth();
@@ -57,6 +91,7 @@ export default function AttendanceScreen() {
 
   const clockRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const btnScale = useRef(new Animated.Value(1)).current;
 
   const fetchData = useCallback(async () => {
     if (!profile || !tenant) return;
@@ -78,19 +113,13 @@ export default function AttendanceScreen() {
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
-  // Live clock
   useEffect(() => {
-    const tick = () => {
-      const now = new Date();
-      setLiveClock(now.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true }));
-      setLiveDate(now.toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }));
-    };
+    const tick = () => { setLiveClock(fmtLiveClock(new Date())); setLiveDate(fmtLiveDate(new Date())); };
     tick();
     clockRef.current = setInterval(tick, 1000);
     return () => { if (clockRef.current) clearInterval(clockRef.current); };
   }, []);
 
-  // Work timer
   useEffect(() => {
     const tickTimer = () => {
       const todayRec = myPunches;
@@ -113,7 +142,6 @@ export default function AttendanceScreen() {
     return () => { if (timerRef.current) clearInterval(timerRef.current); };
   }, [myPunches]);
 
-  // Set location status label once tenant is loaded
   useEffect(() => {
     if (!tenant) return;
     setLocationStatus(
@@ -123,26 +151,20 @@ export default function AttendanceScreen() {
     );
   }, [tenant]);
 
-  // Returns { loc, msg } — loc is null when blocked, { lat:0, lng:0 } when geofencing disabled
   const checkGeofence = useCallback(async (): Promise<{ loc: { lat: number; lng: number } | null; msg: string }> => {
     if (!tenant?.geofence_lat || !tenant?.geofence_lng) {
       setLocationStatus('Geofencing not configured');
       return { loc: { lat: 0, lng: 0 }, msg: 'Geofencing not configured' };
     }
-
     const { status } = await Location.requestForegroundPermissionsAsync();
     if (status !== 'granted') {
       const msg = 'Location permission denied';
       setLocationStatus(msg);
       return { loc: null, msg };
     }
-
     try {
       const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
-      const dist = calculateDistance(
-        pos.coords.latitude, pos.coords.longitude,
-        tenant.geofence_lat, tenant.geofence_lng,
-      );
+      const dist = calculateDistance(pos.coords.latitude, pos.coords.longitude, tenant.geofence_lat, tenant.geofence_lng);
       const radius = tenant.geofence_radius || 200;
       if (dist > radius) {
         const msg = `Outside office area (${Math.round(dist)}m away)`;
@@ -158,9 +180,17 @@ export default function AttendanceScreen() {
     }
   }, [tenant]);
 
+  const animateBtn = () => {
+    Animated.sequence([
+      Animated.timing(btnScale, { toValue: 0.95, duration: 100, useNativeDriver: true }),
+      Animated.timing(btnScale, { toValue: 1, duration: 200, easing: Easing.out(Easing.back(2)), useNativeDriver: true }),
+    ]).start();
+  };
+
   const handleClockIn = async () => {
     if (!profile || !tenant) { showToast('Account setup incomplete.', 'error'); return; }
     if (isClockedIn) { showToast('Already clocked in!', 'warning'); return; }
+    animateBtn();
     setActionLoading(true);
     const { loc, msg } = await checkGeofence();
     if (loc === null) { showToast(msg, 'error'); setActionLoading(false); return; }
@@ -179,6 +209,7 @@ export default function AttendanceScreen() {
 
   const handleClockOut = async () => {
     if (!isClockedIn) { showToast('Not clocked in!', 'warning'); return; }
+    animateBtn();
     setActionLoading(true);
     const { loc, msg } = await checkGeofence();
     if (loc === null) { showToast(msg, 'error'); setActionLoading(false); return; }
@@ -188,6 +219,7 @@ export default function AttendanceScreen() {
       showToast(`Clocked out. Worked ${worked}`, 'success');
       notify('Clocked Out', `You worked ${worked} today.`, 'info');
       fetchData();
+      maybeAskReview();
     } catch (err: any) {
       showToast('Clock out failed: ' + err.message, 'error');
     } finally {
@@ -201,7 +233,6 @@ export default function AttendanceScreen() {
     setAttMonth(m); setAttYear(y);
   };
 
-  // Calendar
   const renderCalendar = () => {
     const firstDay = new Date(attYear, attMonth, 1).getDay();
     const daysInMonth = new Date(attYear, attMonth + 1, 0).getDate();
@@ -224,24 +255,22 @@ export default function AttendanceScreen() {
 
       let bg = 'transparent';
       let textColor = C.text;
-      let statusDot = '';
 
       if (isToday) bg = C.primary;
       else if (isFuture) textColor = '#CBD5E1';
       else if (isWeekend) textColor = C.muted;
       else if (rec) {
-        bg = (STATUS_COLORS[rec.status] || C.primary) + '25';
+        bg = (STATUS_COLORS[rec.status] || C.primary) + '22';
         textColor = STATUS_COLORS[rec.status] || C.text;
-        statusDot = rec.status?.[0] || '';
       } else if (!isFuture) {
         bg = C.danger + '15';
         textColor = C.danger;
       }
 
       cells.push(
-        <View key={d} style={[s.calCell, { backgroundColor: bg, borderRadius: 8 }]}>
+        <View key={d} style={[s.calCell, { backgroundColor: bg, borderRadius: 10 }]}>
           <Text style={[s.calDay, { color: isToday ? '#fff' : textColor, fontWeight: isToday ? '800' : '400' }]}>{d}</Text>
-          {!!statusDot && !isToday && (
+          {rec && !isToday && (
             <View style={[s.calDot, { backgroundColor: STATUS_COLORS[rec?.status] || C.primary }]} />
           )}
         </View>
@@ -250,7 +279,6 @@ export default function AttendanceScreen() {
     return cells;
   };
 
-  // Summary
   const summary = { present: 0, absent: 0, halfDay: 0, late: 0, leaves: 0, totalHours: 0 };
   const today = new Date();
   for (let d = 1; d <= new Date(attYear, attMonth + 1, 0).getDate(); d++) {
@@ -266,64 +294,95 @@ export default function AttendanceScreen() {
     summary.totalHours += rec.total_hours || 0;
   }
 
+  const statusText = isClockedIn ? 'Currently Working' : myPunches?.punches?.length ? 'Clocked Out' : 'Not Clocked In';
+
   return (
-    <SafeAreaView style={s.safe}>
-      <ScrollView style={s.scroll} showsVerticalScrollIndicator={false}>
-        {/* Page title */}
+    <SafeAreaView style={s.safe} edges={['top']}>
+      <ScrollView style={s.scroll} showsVerticalScrollIndicator={false}
+        contentContainerStyle={{ paddingBottom: 28 }}>
+
+        {/* ── Page header ── */}
         <View style={s.pageHeader}>
-          <Text style={s.pageTitle}>My Attendance</Text>
+          <Text style={s.pageTitle}>Attendance</Text>
           <Text style={s.pageSubtitle}>{monthLabel(attMonth, attYear)}</Text>
         </View>
 
-        {/* Clock widget */}
+        {/* ── Clock Widget ── */}
         <View style={s.clockWidget}>
-          <View style={s.clockTop}>
-            <View style={s.clockInfo}>
-              <Text style={s.clockTime}>{liveClock}</Text>
-              <Text style={s.clockDate} numberOfLines={1}>{liveDate}</Text>
-              <View style={s.clockStatus}>
-                <View style={[s.pulse, { backgroundColor: isClockedIn ? '#4ADE80' : '#94A3B8' }]} />
-                <Text style={s.clockStatusText}>
-                  {isClockedIn ? 'Currently Working' : myPunches?.punches?.length ? 'Clocked Out' : 'Not Clocked In'}
-                </Text>
+          <View style={s.clockDecor1} />
+          <View style={s.clockDecor2} />
+
+          {/* Time + Status row */}
+          <View style={s.clockTopRow}>
+            <View style={s.clockLeft}>
+              <Text style={s.liveTime}>{liveClock}</Text>
+              <Text style={s.liveDate}>{liveDate}</Text>
+              <View style={s.statusRow}>
+                <StatusPulse active={isClockedIn} />
+                <Text style={s.statusText}>{statusText}</Text>
               </View>
               <View style={s.locationRow}>
-                <Ionicons name="location-outline" size={11} color="rgba(255,255,255,0.5)" />
+                <Ionicons name="location-outline" size={11} color="rgba(255,255,255,0.4)" />
                 <Text style={s.locationText} numberOfLines={1}>{locationStatus}</Text>
               </View>
             </View>
-            <View style={s.timerWrap}>
-              <Text style={s.timerLabel}>Today's Hours</Text>
-              <Text style={s.timerText}>{timerDisplay}</Text>
+            <View style={s.timerBox}>
+              <Text style={s.timerLabel}>TODAY'S HOURS</Text>
+              <Text style={s.timerValue}>{timerDisplay}</Text>
+              {isClockedIn && (
+                <View style={s.timerActivePill}>
+                  <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: C.success }} />
+                  <Text style={s.timerActiveTxt}>Live</Text>
+                </View>
+              )}
             </View>
           </View>
 
-          <View style={s.divider} />
+          {/* Divider */}
+          <View style={s.widgetDivider} />
 
+          {/* Clock buttons */}
           <View style={s.clockBtns}>
-            <TouchableOpacity
-              style={[s.clockBtn, s.clockInBtn, (isClockedIn || actionLoading) && s.btnDisabled]}
-              onPress={handleClockIn}
-              disabled={isClockedIn || actionLoading}
-            >
-              {actionLoading && !isClockedIn
-                ? <ActivityIndicator color="#fff" size="small" />
-                : <><Ionicons name="log-in-outline" size={18} color="#fff" /><Text style={s.clockBtnText}> Clock In</Text></>}
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[s.clockBtn, s.clockOutBtn, (!isClockedIn || actionLoading) && s.btnDisabled]}
-              onPress={handleClockOut}
-              disabled={!isClockedIn || actionLoading}
-            >
-              {actionLoading && isClockedIn
-                ? <ActivityIndicator color="#fff" size="small" />
-                : <><Ionicons name="log-out-outline" size={18} color="#fff" /><Text style={s.clockBtnText}> Clock Out</Text></>}
-            </TouchableOpacity>
+            <Animated.View style={[{ flex: 1 }, { transform: [{ scale: btnScale }] }]}>
+              <TouchableOpacity
+                style={[s.clockInBtn, (isClockedIn || actionLoading) && s.btnDisabled]}
+                onPress={handleClockIn}
+                disabled={isClockedIn || actionLoading}
+                activeOpacity={0.85}
+              >
+                {actionLoading && !isClockedIn
+                  ? <ActivityIndicator color="#fff" size="small" />
+                  : <>
+                      <View style={s.clockBtnIcon}>
+                        <Ionicons name="log-in-outline" size={20} color={C.success} />
+                      </View>
+                      <Text style={s.clockBtnText}>Clock In</Text>
+                    </>}
+              </TouchableOpacity>
+            </Animated.View>
+
+            <Animated.View style={[{ flex: 1 }, { transform: [{ scale: btnScale }] }]}>
+              <TouchableOpacity
+                style={[s.clockOutBtn, (!isClockedIn || actionLoading) && s.btnDisabled]}
+                onPress={handleClockOut}
+                disabled={!isClockedIn || actionLoading}
+                activeOpacity={0.85}
+              >
+                {actionLoading && isClockedIn
+                  ? <ActivityIndicator color="#fff" size="small" />
+                  : <>
+                      <View style={[s.clockBtnIcon, { backgroundColor: 'rgba(239,68,68,0.15)' }]}>
+                        <Ionicons name="log-out-outline" size={20} color={C.danger} />
+                      </View>
+                      <Text style={[s.clockBtnText, { color: C.danger }]}>Clock Out</Text>
+                    </>}
+              </TouchableOpacity>
+            </Animated.View>
           </View>
         </View>
 
-        {/* Summary bar */}
-        <View style={s.summaryBar}>
+        {/* ── Summary strip ── */}
+        <View style={s.summaryStrip}>
           {[
             { val: summary.present, lbl: 'Present', color: C.success },
             { val: summary.absent, lbl: 'Absent', color: C.danger },
@@ -331,130 +390,213 @@ export default function AttendanceScreen() {
             { val: summary.late, lbl: 'Late', color: C.warning },
             { val: summary.leaves, lbl: 'Leaves', color: C.purple },
             { val: fmtDuration(summary.totalHours), lbl: 'Hrs', color: C.primary },
-          ].map((item) => (
-            <View key={item.lbl} style={s.summaryItem}>
+          ].map((item, idx) => (
+            <View key={item.lbl} style={[s.summaryItem, idx < 5 && s.summaryItemBorder]}>
               <Text style={[s.summaryVal, { color: item.color }]}>{item.val}</Text>
               <Text style={s.summaryLbl}>{item.lbl}</Text>
             </View>
           ))}
         </View>
 
-        {/* Month selector + calendar */}
+        {/* ── Calendar ── */}
         <View style={s.card}>
           <View style={s.cardHeader}>
-            <Text style={s.cardTitle}>Monthly Calendar</Text>
+            <View style={s.cardTitleRow}>
+              <View style={s.cardTitleDot} />
+              <Text style={s.cardTitle}>Monthly Calendar</Text>
+            </View>
             <View style={s.monthNav}>
               <TouchableOpacity onPress={() => changeMonth(-1)} style={s.navBtn}>
-                <Ionicons name="chevron-back" size={18} color={C.primary} />
+                <Ionicons name="chevron-back" size={16} color={C.primary} />
               </TouchableOpacity>
               <Text style={s.monthLabel}>{monthLabel(attMonth, attYear)}</Text>
               <TouchableOpacity onPress={() => changeMonth(1)} style={s.navBtn}>
-                <Ionicons name="chevron-forward" size={18} color={C.primary} />
+                <Ionicons name="chevron-forward" size={16} color={C.primary} />
               </TouchableOpacity>
             </View>
           </View>
           {loading ? (
             <ActivityIndicator color={C.primary} style={{ padding: 24 }} />
           ) : (
-            <View style={s.calendar}>
-              {renderCalendar()}
-            </View>
+            <View style={s.calendar}>{renderCalendar()}</View>
           )}
+          {/* Legend */}
+          <View style={s.legend}>
+            {Object.entries(STATUS_COLORS).map(([key, color]) => (
+              <View key={key} style={s.legendItem}>
+                <View style={[s.legendDot, { backgroundColor: color }]} />
+                <Text style={s.legendText}>{key}</Text>
+              </View>
+            ))}
+          </View>
         </View>
 
-        {/* Today's timeline */}
+        {/* ── Today's Timeline ── */}
         <View style={s.card}>
           <View style={s.cardHeader}>
-            <Text style={s.cardTitle}>Today's Timeline</Text>
+            <View style={s.cardTitleRow}>
+              <View style={[s.cardTitleDot, { backgroundColor: C.success }]} />
+              <Text style={s.cardTitle}>Today's Timeline</Text>
+            </View>
           </View>
           {!myPunches?.punches?.length ? (
-            <Text style={s.emptyText}>No punches recorded today.</Text>
+            <View style={s.emptyRow}>
+              <Ionicons name="time-outline" size={28} color={C.muted} />
+              <Text style={s.emptyText}>No punches recorded today.</Text>
+            </View>
           ) : (
             <View style={s.timeline}>
               {[...myPunches.punches]
                 .sort((a: any, b: any) => a.punch_time.localeCompare(b.punch_time))
-                .map((p: any, i: number) => (
+                .map((p: any, i: number, arr: any[]) => (
                   <View key={p.id || i} style={s.timelineItem}>
-                    <View style={[s.timelineDot, { backgroundColor: p.punch_type === 'in' ? C.success : C.danger }]} />
-                    <Text style={s.timelineTime}>{fmtTime12(p.punch_time)}</Text>
-                    <Text style={s.timelineLabel}>{p.punch_type === 'in' ? (i === 0 ? 'Clock In' : 'Resume') : 'Clock Out'}</Text>
+                    <View style={s.timelineLeft}>
+                      <View style={[s.tlDot, { backgroundColor: p.punch_type === 'in' ? C.success : C.danger }]} />
+                      {i < arr.length - 1 && <View style={s.tlLine} />}
+                    </View>
+                    <View style={s.timelineRight}>
+                      <Text style={s.tlTime}>{fmtTime12(p.punch_time)}</Text>
+                      <View style={[s.tlTypePill, { backgroundColor: p.punch_type === 'in' ? C.successBg : C.dangerBg }]}>
+                        <Text style={[s.tlType, { color: p.punch_type === 'in' ? C.success : C.danger }]}>
+                          {p.punch_type === 'in' ? (i === 0 ? 'Clock In' : 'Resume') : 'Clock Out'}
+                        </Text>
+                      </View>
+                    </View>
                   </View>
                 ))}
             </View>
           )}
         </View>
-
-        <View style={{ height: 20 }} />
       </ScrollView>
     </SafeAreaView>
   );
 }
 
 const s = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: '#EFF6FF' },
-  scroll: { flex: 1, backgroundColor: '#F8FAFC' },
-  pageHeader: { paddingHorizontal: 20, paddingTop: 20, paddingBottom: 12, backgroundColor: '#EFF6FF' },
-  pageTitle: { fontSize: 22, fontWeight: '800', color: C.text },
-  pageSubtitle: { fontSize: 13, color: C.muted, marginTop: 2 },
+  safe: { flex: 1, backgroundColor: C.dark },
+  scroll: { flex: 1, backgroundColor: C.bg },
+  pageHeader: {
+    paddingHorizontal: 20, paddingTop: 18, paddingBottom: 14,
+    backgroundColor: C.dark,
+  },
+  pageTitle: { fontSize: 24, fontWeight: '900', color: '#fff' },
+  pageSubtitle: { fontSize: 13, color: 'rgba(255,255,255,0.4)', marginTop: 2 },
+
+  // Clock widget
   clockWidget: {
-    marginHorizontal: 16, marginBottom: 16, borderRadius: 20,
-    backgroundColor: '#0F172A', padding: 20,
-    shadowColor: '#000', shadowOpacity: 0.2, shadowRadius: 16, elevation: 8,
+    marginHorizontal: 14, marginBottom: 14, borderRadius: 24,
+    backgroundColor: C.dark,
+    padding: 20, overflow: 'hidden',
+    shadowColor: C.primary, shadowOpacity: 0.25, shadowRadius: 20, elevation: 10,
+    borderWidth: 1, borderColor: 'rgba(108,92,231,0.2)',
   },
-  clockTop: { flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 16 },
-  clockInfo: { flex: 1 },
-  clockTime: { fontSize: 22, fontWeight: '800', color: '#fff', letterSpacing: 0.5 },
-  clockDate: { fontSize: 12, color: 'rgba(255,255,255,0.55)', marginTop: 3 },
-  clockStatus: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 10 },
-  pulse: { width: 8, height: 8, borderRadius: 4 },
-  clockStatusText: { fontSize: 12, color: 'rgba(255,255,255,0.85)', fontWeight: '600' },
+  clockDecor1: {
+    position: 'absolute', top: -50, right: -50,
+    width: 160, height: 160, borderRadius: 80,
+    backgroundColor: C.primary, opacity: 0.1,
+  },
+  clockDecor2: {
+    position: 'absolute', bottom: -30, left: -30,
+    width: 100, height: 100, borderRadius: 50,
+    backgroundColor: C.primaryLight, opacity: 0.06,
+  },
+  clockTopRow: { flexDirection: 'row', gap: 14, marginBottom: 16 },
+  clockLeft: { flex: 1 },
+  liveTime: { fontSize: 32, fontWeight: '900', color: '#fff', letterSpacing: 1.5, fontVariant: ['tabular-nums'] },
+  liveDate: { fontSize: 12, color: 'rgba(255,255,255,0.45)', marginTop: 4 },
+  statusRow: { flexDirection: 'row', alignItems: 'center', gap: 7, marginTop: 10 },
+  statusText: { fontSize: 12.5, color: 'rgba(255,255,255,0.8)', fontWeight: '600' },
   locationRow: { flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 5 },
-  locationText: { fontSize: 11, color: 'rgba(255,255,255,0.5)', flexShrink: 1 },
-  timerWrap: {
-    alignItems: 'center', backgroundColor: 'rgba(255,255,255,0.08)',
-    borderRadius: 14, paddingVertical: 10, paddingHorizontal: 14, flexShrink: 0,
+  locationText: { fontSize: 11, color: 'rgba(255,255,255,0.4)', flexShrink: 1 },
+
+  timerBox: {
+    alignItems: 'center', justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.07)',
+    borderRadius: 18, paddingVertical: 14, paddingHorizontal: 14, minWidth: 120,
+    borderWidth: 1, borderColor: 'rgba(255,255,255,0.06)',
   },
-  timerText: { fontSize: 20, fontWeight: '800', color: '#fff', fontVariant: ['tabular-nums'], marginTop: 4 },
-  timerLabel: { fontSize: 10, color: 'rgba(255,255,255,0.5)', fontWeight: '500', textTransform: 'uppercase', letterSpacing: 0.5 },
-  divider: { height: 1, backgroundColor: 'rgba(255,255,255,0.08)', marginBottom: 16 },
-  clockBtns: { flexDirection: 'row', gap: 12 },
-  clockBtn: {
+  timerLabel: { fontSize: 9, color: 'rgba(255,255,255,0.4)', fontWeight: '700', letterSpacing: 1, textTransform: 'uppercase' },
+  timerValue: { fontSize: 22, fontWeight: '900', color: '#fff', fontVariant: ['tabular-nums'], marginTop: 6, letterSpacing: 1 },
+  timerActivePill: {
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    backgroundColor: 'rgba(16,185,129,0.2)', borderRadius: 10,
+    paddingHorizontal: 8, paddingVertical: 3, marginTop: 6,
+  },
+  timerActiveTxt: { fontSize: 10, color: C.success, fontWeight: '700' },
+
+  widgetDivider: { height: 1, backgroundColor: 'rgba(255,255,255,0.07)', marginBottom: 16 },
+
+  clockBtns: { flexDirection: 'row', gap: 10 },
+  clockInBtn: {
     flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
-    paddingVertical: 13, borderRadius: 12, gap: 6,
+    backgroundColor: 'rgba(16,185,129,0.15)',
+    borderRadius: 14, paddingVertical: 14, gap: 8,
+    borderWidth: 1, borderColor: 'rgba(16,185,129,0.3)',
   },
-  clockInBtn: { backgroundColor: C.success },
-  clockOutBtn: { backgroundColor: C.danger },
-  btnDisabled: { opacity: 0.4 },
-  clockBtnText: { color: '#fff', fontSize: 14, fontWeight: '700' },
-  summaryBar: {
-    flexDirection: 'row', backgroundColor: C.surface, marginHorizontal: 16,
-    borderRadius: 14, paddingVertical: 14, paddingHorizontal: 8, marginBottom: 16,
-    shadowColor: '#000', shadowOpacity: 0.05, shadowRadius: 8, elevation: 3,
+  clockOutBtn: {
+    flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    backgroundColor: 'rgba(239,68,68,0.1)',
+    borderRadius: 14, paddingVertical: 14, gap: 8,
+    borderWidth: 1, borderColor: 'rgba(239,68,68,0.2)',
+  },
+  clockBtnIcon: {
+    width: 34, height: 34, borderRadius: 10,
+    backgroundColor: 'rgba(16,185,129,0.15)',
+    alignItems: 'center', justifyContent: 'center',
+  },
+  clockBtnText: { fontSize: 14, fontWeight: '800', color: C.success },
+  btnDisabled: { opacity: 0.35 },
+
+  // Summary strip
+  summaryStrip: {
+    flexDirection: 'row', backgroundColor: C.surface,
+    marginHorizontal: 14, borderRadius: 18,
+    paddingVertical: 14, paddingHorizontal: 6, marginBottom: 14,
+    shadowColor: '#000', shadowOpacity: 0.06, shadowRadius: 10, elevation: 3,
   },
   summaryItem: { flex: 1, alignItems: 'center' },
-  summaryVal: { fontSize: 15, fontWeight: '800' },
-  summaryLbl: { fontSize: 10, color: C.muted, marginTop: 2 },
+  summaryItemBorder: { borderRightWidth: 1, borderRightColor: C.border },
+  summaryVal: { fontSize: 16, fontWeight: '900' },
+  summaryLbl: { fontSize: 9, color: C.muted, marginTop: 3, fontWeight: '600', textTransform: 'uppercase' },
+
+  // Card
   card: {
-    marginHorizontal: 16, marginBottom: 16, backgroundColor: C.surface,
-    borderRadius: 16, padding: 16,
-    shadowColor: '#000', shadowOpacity: 0.05, shadowRadius: 8, elevation: 3,
+    marginHorizontal: 14, marginBottom: 14, backgroundColor: C.surface,
+    borderRadius: 20, padding: 16,
+    shadowColor: '#000', shadowOpacity: 0.05, shadowRadius: 10, elevation: 3,
   },
-  cardHeader: {
-    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14,
+  cardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 },
+  cardTitleRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  cardTitleDot: { width: 4, height: 18, borderRadius: 2, backgroundColor: C.primary },
+  cardTitle: { fontSize: 15, fontWeight: '700', color: C.text },
+  monthNav: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  navBtn: {
+    width: 30, height: 30, borderRadius: 10,
+    backgroundColor: C.primaryBg, alignItems: 'center', justifyContent: 'center',
   },
-  cardTitle: { fontSize: 15, fontWeight: '700', color: C.text, flex: 1 },
-  monthNav: { flexDirection: 'row', alignItems: 'center', gap: 8, flexShrink: 0 },
-  navBtn: { padding: 4 },
   monthLabel: { fontSize: 13, color: C.text, fontWeight: '600', minWidth: 100, textAlign: 'center' },
+
+  // Calendar
   calendar: { flexDirection: 'row', flexWrap: 'wrap' },
-  calHeader: { width: '14.28%', textAlign: 'center', fontSize: 10, color: C.muted, fontWeight: '600', paddingVertical: 4 },
-  calCell: { width: '14.28%', aspectRatio: 1, alignItems: 'center', justifyContent: 'center', padding: 2 },
-  calDay: { fontSize: 12, fontWeight: '400', color: C.text },
+  calHeader: { width: '14.28%', textAlign: 'center', fontSize: 10, color: C.muted, fontWeight: '700', paddingVertical: 6, textTransform: 'uppercase' },
+  calCell: { width: '14.28%', aspectRatio: 1, alignItems: 'center', justifyContent: 'center', padding: 1 },
+  calDay: { fontSize: 12, color: C.text },
   calDot: { width: 4, height: 4, borderRadius: 2, marginTop: 2 },
-  emptyText: { color: C.muted, fontSize: 13, padding: 8 },
-  timeline: { gap: 10 },
-  timelineItem: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 4 },
-  timelineDot: { width: 10, height: 10, borderRadius: 5 },
-  timelineTime: { fontSize: 14, fontWeight: '700', color: C.text, width: 80 },
-  timelineLabel: { fontSize: 13, color: C.muted },
+  legend: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginTop: 12, paddingTop: 10, borderTopWidth: 1, borderTopColor: C.border },
+  legendItem: { flexDirection: 'row', alignItems: 'center', gap: 5 },
+  legendDot: { width: 8, height: 8, borderRadius: 4 },
+  legendText: { fontSize: 10, color: C.muted, fontWeight: '500' },
+
+  // Timeline
+  emptyRow: { alignItems: 'center', paddingVertical: 16, gap: 8 },
+  emptyText: { color: C.muted, fontSize: 13 },
+  timeline: { gap: 0 },
+  timelineItem: { flexDirection: 'row', gap: 12, paddingBottom: 4 },
+  timelineLeft: { alignItems: 'center', width: 20 },
+  tlDot: { width: 14, height: 14, borderRadius: 7, borderWidth: 2, borderColor: C.surface, marginTop: 4 },
+  tlLine: { width: 2, flex: 1, backgroundColor: C.border, marginTop: 4, marginBottom: 4, borderRadius: 1, minHeight: 20 },
+  timelineRight: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 10, paddingBottom: 16 },
+  tlTime: { fontSize: 14, fontWeight: '700', color: C.text, width: 84, fontVariant: ['tabular-nums'] },
+  tlTypePill: { borderRadius: 10, paddingHorizontal: 10, paddingVertical: 4 },
+  tlType: { fontSize: 12, fontWeight: '700' },
 });

@@ -1,222 +1,469 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity,
-  ActivityIndicator, Alert,
+  Animated, Dimensions, Easing,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { useAuth } from '@/context/AuthContext';
-import { fetchMyMonthStats } from '@/services/attendanceService';
-import { fetchMyAdvanceBalance } from '@/services/advanceService';
-import { fmt, monthLabel } from '@/lib/helpers';
+import { fetchMyMonthAttendance } from '@/services/attendanceService';
+import {
+  todayStr, dateStr, timeStr, diffHours, fmtDuration, monthLabel, fmtTime12,
+} from '@/lib/helpers';
+import { Colors as C } from '@/constants/Colors';
 
-const C = {
-  primary: '#00AEEF',
-  bg: '#F8FAFC',
-  surface: '#FFFFFF',
-  text: '#1E293B',
-  muted: '#94A3B8',
-  border: '#E2E8F0',
-  success: '#22C55E',
-  warning: '#F59E0B',
-  purple: '#8B5CF6',
-};
+const { width: SCREEN_W } = Dimensions.get('window');
 
-function StatCard({
-  icon, iconBg, value, label,
-}: { icon: keyof typeof Ionicons.glyphMap; iconBg: string; value: string; label: string }) {
+// ── Shimmer skeleton ───────────────────────────────────────────────────────────
+function Skeleton({ w, h, radius = 10 }: { w: number | string; h: number; radius?: number }) {
+  const anim = useRef(new Animated.Value(0.3)).current;
+  useEffect(() => {
+    Animated.loop(
+      Animated.sequence([
+        Animated.timing(anim, { toValue: 0.9, duration: 700, easing: Easing.inOut(Easing.ease), useNativeDriver: true }),
+        Animated.timing(anim, { toValue: 0.3, duration: 700, easing: Easing.inOut(Easing.ease), useNativeDriver: true }),
+      ])
+    ).start();
+  }, []);
   return (
-    <View style={s.statCard}>
-      <View style={[s.statIcon, { backgroundColor: iconBg + '20' }]}>
-        <Ionicons name={icon} size={22} color={iconBg} />
+    <Animated.View style={{
+      width: w as any, height: h, borderRadius: radius,
+      backgroundColor: '#DDD6FE', opacity: anim,
+    }} />
+  );
+}
+
+function HomeSkeleton() {
+  return (
+    <View style={{ paddingTop: 8 }}>
+      <View style={[sk.card, { marginHorizontal: 16, marginBottom: 14, padding: 20, gap: 14 }]}>
+        <Skeleton w="50%" h={12} />
+        <Skeleton w="70%" h={22} radius={6} />
+        <Skeleton w="85%" h={12} />
+        <Skeleton w={SCREEN_W - 72} h={48} radius={14} />
       </View>
-      <Text style={s.statValue}>{value}</Text>
-      <Text style={s.statLabel}>{label}</Text>
+      <View style={[sk.row, { marginHorizontal: 16, gap: 10 }]}>
+        {[1, 2, 3, 4].map((i) => (
+          <View key={i} style={[sk.card, { flex: 1, padding: 14, gap: 8, alignItems: 'center', borderRadius: 16 }]}>
+            <Skeleton w={30} h={24} radius={6} />
+            <Skeleton w={38} h={10} radius={4} />
+          </View>
+        ))}
+      </View>
     </View>
   );
 }
 
+const sk = StyleSheet.create({
+  card: { backgroundColor: '#EDE9FE', borderRadius: 18 },
+  row: { flexDirection: 'row' },
+});
+
+// ── Greeting helper ────────────────────────────────────────────────────────────
+function greeting() {
+  const h = new Date().getHours();
+  if (h < 12) return 'Good morning';
+  if (h < 17) return 'Good afternoon';
+  return 'Good evening';
+}
+
+// ── Animated card wrapper ──────────────────────────────────────────────────────
+function AnimatedCard({ children, delay = 0, style }: any) {
+  const translateY = useRef(new Animated.Value(30)).current;
+  const opacity = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    Animated.parallel([
+      Animated.timing(translateY, { toValue: 0, duration: 500, delay, easing: Easing.out(Easing.back(1.2)), useNativeDriver: true }),
+      Animated.timing(opacity, { toValue: 1, duration: 400, delay, useNativeDriver: true }),
+    ]).start();
+  }, []);
+
+  return (
+    <Animated.View style={[{ opacity, transform: [{ translateY }] }, style]}>
+      {children}
+    </Animated.View>
+  );
+}
+
+// ── Pulse dot ──────────────────────────────────────────────────────────────────
+function PulseDot({ color }: { color: string }) {
+  const scale = useRef(new Animated.Value(1)).current;
+  useEffect(() => {
+    Animated.loop(
+      Animated.sequence([
+        Animated.timing(scale, { toValue: 1.6, duration: 700, useNativeDriver: true }),
+        Animated.timing(scale, { toValue: 1, duration: 700, useNativeDriver: true }),
+      ])
+    ).start();
+  }, []);
+  return (
+    <View style={{ width: 12, height: 12, alignItems: 'center', justifyContent: 'center' }}>
+      <Animated.View style={{
+        position: 'absolute',
+        width: 12, height: 12, borderRadius: 6,
+        backgroundColor: color, opacity: 0.3,
+        transform: [{ scale }],
+      }} />
+      <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: color }} />
+    </View>
+  );
+}
+
+// ── Main screen ────────────────────────────────────────────────────────────────
 export default function DashboardScreen() {
-  const { profile, tenant, signOut } = useAuth();
+  const { profile, tenant } = useAuth();
   const router = useRouter();
-  const [stats, setStats] = useState({ presentDays: 0, outstandingAdvances: 0 });
-  const [showSalary, setShowSalary] = useState(false);
+
   const [loading, setLoading] = useState(true);
+  const [todayRec, setTodayRec] = useState<any>(null);
+  const [summary, setSummary] = useState({ present: 0, absent: 0, late: 0, totalHours: 0 });
+  const headerFade = useRef(new Animated.Value(0)).current;
 
   const now = new Date();
 
-  useEffect(() => {
+  const loadData = useCallback(async () => {
     if (!profile || !tenant) return;
     setLoading(true);
-    Promise.all([
-      fetchMyMonthStats(profile.id, now.getFullYear(), now.getMonth()),
-      fetchMyAdvanceBalance(profile.id),
-    ]).then(([attRes, advRes]) => {
-      setStats({ presentDays: attRes.presentDays, outstandingAdvances: advRes.total });
+    try {
+      const { data } = await fetchMyMonthAttendance(profile.id, now.getFullYear(), now.getMonth());
+      const today = data.find((r: any) => r.date === todayStr()) || null;
+      setTodayRec(today);
+
+      let present = 0, absent = 0, late = 0, totalHours = 0;
+      for (let d = 1; d <= new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate(); d++) {
+        const date = new Date(now.getFullYear(), now.getMonth(), d);
+        if (date > now || date.getDay() === 0 || date.getDay() === 6) continue;
+        const rec = data.find((r: any) => r.date === dateStr(date));
+        if (!rec) { if (date < now) absent++; continue; }
+        if (rec.status === 'Present') present++;
+        else if (rec.status === 'Late') { present++; late++; }
+        else if (rec.status === 'Absent') absent++;
+        totalHours += rec.total_hours || 0;
+      }
+      setSummary({ present, absent, late, totalHours });
+    } finally {
       setLoading(false);
-    });
+    }
   }, [profile, tenant]);
 
-  const handleSignOut = () => {
-    Alert.alert('Sign Out', 'Are you sure you want to sign out?', [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Sign Out', style: 'destructive', onPress: signOut },
-    ]);
-  };
+  useEffect(() => { loadData(); }, [loadData]);
 
-  const ctcDisplay = showSalary ? fmt(profile?.ctc || 0) : '₹ ••••••';
-  const advDisplay = showSalary ? fmt(stats.outstandingAdvances) : '₹ ••••••';
+  useEffect(() => {
+    Animated.timing(headerFade, { toValue: 1, duration: 600, useNativeDriver: true }).start();
+  }, []);
+
+  const punches = todayRec?.punches || [];
+  const sortedPunches = [...punches].sort((a: any, b: any) => a.punch_time.localeCompare(b.punch_time));
+  const ins = sortedPunches.filter((p: any) => p.punch_type === 'in');
+  const outs = sortedPunches.filter((p: any) => p.punch_type === 'out');
+  const isClockedIn = ins.length > outs.length;
+  const hasPunches = punches.length > 0;
+
+  let workedSecs = 0;
+  for (let i = 0; i < ins.length; i++) {
+    const outT = outs[i]?.punch_time || timeStr(new Date());
+    workedSecs += diffHours(ins[i].punch_time, outT) * 3600;
+  }
+  const workedDisplay = workedSecs > 0 ? fmtDuration(workedSecs / 3600) : null;
+
+  const lastPunch = sortedPunches[sortedPunches.length - 1];
+  const statusLabel = isClockedIn ? 'Currently Working' : hasPunches ? 'Clocked Out' : 'Not Clocked In';
+  const statusColor = isClockedIn ? C.success : hasPunches ? C.warning : C.muted;
+  const statusBg = isClockedIn ? C.successBg : hasPunches ? C.warningBg : '#F1F5F9';
+
+  const dateLabel = now.toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long' });
+
+  const QUICK_ACTIONS = [
+    { label: 'Clock In / Out', icon: 'finger-print' as const, color: C.primary, bg: C.primaryBg, route: '/attendance' },
+    { label: 'Request Leave', icon: 'calendar-outline' as const, color: C.teal, bg: C.tealBg, route: '/leaves' },
+    { label: 'Special Request', icon: 'flash-outline' as const, color: C.amber, bg: C.amberBg, route: '/requests' },
+    { label: 'Regularize', icon: 'calendar-number-outline' as const, color: C.rose, bg: C.roseBg, route: '/requests' },
+    { label: 'My Payslips', icon: 'document-text-outline' as const, color: C.success, bg: C.successBg, route: '/payslips' },
+    { label: 'My Profile', icon: 'person-circle-outline' as const, color: C.primaryDark, bg: '#DDD6FE', route: '/profile' },
+  ];
+
+  const initials = [profile?.first_name?.[0], profile?.last_name?.[0]].filter(Boolean).join('').toUpperCase() || '?';
 
   return (
-    <SafeAreaView style={s.safe}>
-      <ScrollView style={s.scroll} showsVerticalScrollIndicator={false}>
-        {/* Header */}
-        <View style={s.header}>
-          <View>
-            <Text style={s.greeting}>Welcome back,</Text>
-            <Text style={s.name}>{profile?.first_name || 'User'} 👋</Text>
-            <Text style={s.period}>{monthLabel(now.getMonth(), now.getFullYear())}</Text>
+    <SafeAreaView style={s.safe} edges={['top']}>
+      <ScrollView
+        style={s.scroll}
+        showsVerticalScrollIndicator={false}
+        contentContainerStyle={{ paddingBottom: 32 }}
+      >
+        {/* ── Hero Header ──────────────────────────────────────────────── */}
+        <Animated.View style={[s.hero, { opacity: headerFade }]}>
+          <View style={s.heroDecor1} />
+          <View style={s.heroDecor2} />
+          <View style={s.heroRow}>
+            <View style={s.heroLeft}>
+              <Text style={s.heroGreeting}>{greeting()} 👋</Text>
+              <Text style={s.heroName} numberOfLines={1}>
+                {profile?.first_name || 'there'} {profile?.last_name || ''}
+              </Text>
+              {tenant && (
+                <View style={s.heroBadge}>
+                  <Ionicons name="business-outline" size={11} color="rgba(255,255,255,0.7)" />
+                  <Text style={s.heroBadgeText}>{tenant.company_name}</Text>
+                </View>
+              )}
+            </View>
+            <TouchableOpacity onPress={() => router.push('/profile' as any)} activeOpacity={0.8}>
+              <View style={s.avatar}>
+                <Text style={s.avatarText}>{initials}</Text>
+              </View>
+              <View style={s.avatarOnline} />
+            </TouchableOpacity>
           </View>
-          <TouchableOpacity style={s.signOutBtn} onPress={handleSignOut}>
-            <Ionicons name="log-out-outline" size={22} color={C.muted} />
-          </TouchableOpacity>
-        </View>
 
-        {/* Company badge */}
-        {tenant && (
-          <View style={s.companyBadge}>
-            <Ionicons name="business" size={14} color={C.primary} />
-            <Text style={s.companyName}>{tenant.company_name}</Text>
+          {/* Date chip */}
+          <View style={s.dateChip}>
+            <Ionicons name="calendar-clear-outline" size={12} color="rgba(255,255,255,0.6)" />
+            <Text style={s.dateChipText}>{dateLabel}</Text>
+            <Text style={s.dateChipMuted}>· {monthLabel(now.getMonth(), now.getFullYear())}</Text>
           </View>
-        )}
+        </Animated.View>
 
-        {/* Stats */}
+        {/* ── Content ──────────────────────────────────────────────────── */}
         {loading ? (
-          <View style={s.loadingBox}>
-            <ActivityIndicator color={C.primary} />
-          </View>
+          <HomeSkeleton />
         ) : (
           <>
-            <View style={s.salaryRevealRow}>
-              <Text style={s.sectionTitle}>Your Stats</Text>
-              <TouchableOpacity style={s.revealBtn} onPress={() => setShowSalary((v) => !v)}>
-                <Ionicons name={showSalary ? 'eye-off-outline' : 'eye-outline'} size={16} color={C.primary} />
-                <Text style={s.revealText}>{showSalary ? 'Hide' : 'Reveal'}</Text>
-              </TouchableOpacity>
-            </View>
+            {/* ── Today's Status Card ─────────────────────────────────── */}
+            <AnimatedCard delay={100} style={s.todayCard}>
+              <View style={s.todayCardInner}>
+                {/* Left colored accent */}
+                <View style={[s.cardAccent, { backgroundColor: statusColor }]} />
+                <View style={{ flex: 1 }}>
+                  <View style={s.todayTop}>
+                    <View style={[s.statusPill, { backgroundColor: statusBg }]}>
+                      <PulseDot color={statusColor} />
+                      <Text style={[s.statusLabel, { color: statusColor }]}>{statusLabel}</Text>
+                    </View>
+                    {workedDisplay && (
+                      <View style={s.workedPill}>
+                        <Ionicons name="time-outline" size={12} color={C.primary} />
+                        <Text style={s.workedText}>{workedDisplay}</Text>
+                      </View>
+                    )}
+                  </View>
 
-            <View style={s.statsRow}>
-              <StatCard
-                icon="wallet-outline"
-                iconBg={C.success}
-                value={ctcDisplay}
-                label="Monthly CTC"
-              />
-              <StatCard
-                icon="calendar-clear-outline"
-                iconBg={C.primary}
-                value={String(stats.presentDays)}
-                label="Days Present"
-              />
-              <StatCard
-                icon="cash-outline"
-                iconBg={C.warning}
-                value={advDisplay}
-                label="Loan Balance"
-              />
-            </View>
+                  {lastPunch && (
+                    <View style={s.lastPunchRow}>
+                      <Ionicons name={lastPunch.punch_type === 'in' ? 'log-in-outline' : 'log-out-outline'} size={13} color={C.muted} />
+                      <Text style={s.lastPunchText}>
+                        Last punch: {fmtTime12(lastPunch.punch_time)} · {lastPunch.punch_type === 'in' ? 'Clock In' : 'Clock Out'}
+                      </Text>
+                    </View>
+                  )}
+                  {!hasPunches && (
+                    <View style={s.lastPunchRow}>
+                      <Ionicons name="time-outline" size={13} color={C.muted} />
+                      <Text style={s.lastPunchText}>You haven't clocked in today yet.</Text>
+                    </View>
+                  )}
+
+                  <TouchableOpacity
+                    style={s.attendanceBtn}
+                    onPress={() => router.push('/attendance' as any)}
+                    activeOpacity={0.85}
+                  >
+                    <Ionicons name="finger-print" size={18} color="#fff" />
+                    <Text style={s.attendanceBtnText}>
+                      {isClockedIn ? 'Clock Out / View Attendance' : 'Go to Attendance'}
+                    </Text>
+                    <View style={s.btnArrow}>
+                      <Ionicons name="arrow-forward" size={14} color={C.primary} />
+                    </View>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            </AnimatedCard>
+
+            {/* ── Month Summary ────────────────────────────────────────── */}
+            <AnimatedCard delay={200}>
+              <Text style={s.sectionLabel}>This Month</Text>
+              <View style={s.summaryRow}>
+                {[
+                  { val: summary.present, label: 'Present', color: C.success, bg: C.successBg, icon: 'checkmark-circle' as const },
+                  { val: summary.absent, label: 'Absent', color: C.danger, bg: C.dangerBg, icon: 'close-circle' as const },
+                  { val: summary.late, label: 'Late', color: C.warning, bg: C.warningBg, icon: 'alert-circle' as const },
+                  { val: fmtDuration(summary.totalHours), label: 'Hours', color: C.primary, bg: C.primaryBg, icon: 'timer-outline' as const },
+                ].map((item) => (
+                  <TouchableOpacity
+                    key={item.label}
+                    style={[s.summaryCard, { backgroundColor: item.bg }]}
+                    onPress={() => router.push('/attendance' as any)}
+                    activeOpacity={0.75}
+                  >
+                    <Ionicons name={item.icon} size={18} color={item.color} />
+                    <Text style={[s.summaryVal, { color: item.color }]}>{item.val}</Text>
+                    <Text style={[s.summaryLbl, { color: item.color + 'AA' }]}>{item.label}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </AnimatedCard>
           </>
         )}
 
-        {/* Quick Actions */}
-        <Text style={[s.sectionTitle, { marginTop: 24 }]}>Quick Actions</Text>
-        <View style={s.actionsGrid}>
-          {[
-            { label: 'Clock In / Out', icon: 'finger-print' as const, color: C.primary, route: '/attendance' },
-            { label: 'My Payslip', icon: 'document-text' as const, color: C.success, route: '/payslips' },
-            { label: 'Request Leave', icon: 'calendar' as const, color: C.purple, route: '/leaves' },
-            { label: 'Attendance Log', icon: 'list' as const, color: C.warning, route: '/attendance' },
-          ].map((item) => (
-            <TouchableOpacity
-              key={item.label}
-              style={s.actionCard}
-              onPress={() => router.push(item.route as any)}
-            >
-              <View style={[s.actionIcon, { backgroundColor: item.color + '15' }]}>
-                <Ionicons name={item.icon} size={26} color={item.color} />
-              </View>
-              <Text style={s.actionLabel}>{item.label}</Text>
-            </TouchableOpacity>
-          ))}
-        </View>
+        {/* ── Quick Actions ─────────────────────────────────────────────── */}
+        <AnimatedCard delay={300}>
+          <Text style={s.sectionLabel}>Quick Actions</Text>
+          <View style={s.actionsGrid}>
+            {QUICK_ACTIONS.map((item, idx) => (
+              <TouchableOpacity
+                key={item.label}
+                style={s.actionCard}
+                onPress={() => router.push(item.route as any)}
+                activeOpacity={0.75}
+              >
+                <View style={[s.actionIconRing, { backgroundColor: item.bg }]}>
+                  <Ionicons name={item.icon} size={26} color={item.color} />
+                </View>
+                <Text style={s.actionLabel} numberOfLines={2}>{item.label}</Text>
+                <View style={s.actionArrow}>
+                  <Ionicons name="chevron-forward" size={12} color={C.muted} />
+                </View>
+              </TouchableOpacity>
+            ))}
+          </View>
+        </AnimatedCard>
 
-        {/* Announcements placeholder */}
-        <Text style={[s.sectionTitle, { marginTop: 24 }]}>Announcements</Text>
-        <View style={s.emptyCard}>
-          <Ionicons name="megaphone-outline" size={32} color={C.muted} />
-          <Text style={s.emptyTitle}>No new announcements</Text>
-          <Text style={s.emptyText}>Team updates will appear here.</Text>
-        </View>
-
-        <View style={{ height: 20 }} />
       </ScrollView>
     </SafeAreaView>
   );
 }
 
 const s = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: '#F0F9FF' },
-  scroll: { flex: 1, backgroundColor: '#F8FAFC' },
-  header: {
-    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start',
-    paddingHorizontal: 20, paddingTop: 20, paddingBottom: 16,
-    backgroundColor: '#F0F9FF',
+  safe: { flex: 1, backgroundColor: C.dark },
+  scroll: { flex: 1, backgroundColor: C.bg },
+
+  // Hero
+  hero: {
+    backgroundColor: C.dark,
+    paddingHorizontal: 20, paddingTop: 14, paddingBottom: 24,
+    overflow: 'hidden',
   },
-  greeting: { fontSize: 14, color: C.muted },
-  name: { fontSize: 22, fontWeight: '800', color: C.text },
-  period: { fontSize: 12, color: C.muted, marginTop: 2 },
-  signOutBtn: { padding: 8 },
-  companyBadge: {
-    flexDirection: 'row', alignItems: 'center', gap: 6,
-    marginHorizontal: 20, marginBottom: 16,
-    backgroundColor: '#E0F7FF', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 5,
+  heroDecor1: {
+    position: 'absolute', top: -40, right: -40,
+    width: 160, height: 160, borderRadius: 80,
+    backgroundColor: C.primary, opacity: 0.12,
+  },
+  heroDecor2: {
+    position: 'absolute', bottom: -20, left: -20,
+    width: 100, height: 100, borderRadius: 50,
+    backgroundColor: C.primaryLight, opacity: 0.08,
+  },
+  heroRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' },
+  heroLeft: { flex: 1, paddingRight: 12 },
+  heroGreeting: { fontSize: 13, color: 'rgba(255,255,255,0.5)', fontWeight: '500', marginBottom: 4 },
+  heroName: { fontSize: 26, fontWeight: '900', color: '#fff', letterSpacing: -0.5 },
+  heroBadge: {
+    flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: 7,
+    backgroundColor: 'rgba(255,255,255,0.08)', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 20,
     alignSelf: 'flex-start',
   },
-  companyName: { fontSize: 13, color: C.primary, fontWeight: '600' },
-  loadingBox: { height: 120, alignItems: 'center', justifyContent: 'center' },
-  salaryRevealRow: {
-    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
-    paddingHorizontal: 20, marginBottom: 12,
+  heroBadgeText: { fontSize: 11.5, color: 'rgba(255,255,255,0.7)', fontWeight: '500' },
+  avatar: {
+    width: 50, height: 50, borderRadius: 25,
+    backgroundColor: C.primary, alignItems: 'center', justifyContent: 'center',
+    borderWidth: 2.5, borderColor: 'rgba(255,255,255,0.15)',
+    shadowColor: C.primary, shadowOpacity: 0.5, shadowRadius: 10, elevation: 6,
   },
-  sectionTitle: { fontSize: 15, fontWeight: '700', color: C.text, paddingHorizontal: 20, marginBottom: 12 },
-  revealBtn: { flexDirection: 'row', alignItems: 'center', gap: 4 },
-  revealText: { fontSize: 13, color: C.primary, fontWeight: '600' },
-  statsRow: { flexDirection: 'row', gap: 12, paddingHorizontal: 20 },
-  statCard: {
-    flex: 1, backgroundColor: C.surface, borderRadius: 16,
-    padding: 14, alignItems: 'center',
-    shadowColor: '#000', shadowOpacity: 0.06, shadowRadius: 8, elevation: 3,
+  avatarText: { fontSize: 18, fontWeight: '800', color: '#fff' },
+  avatarOnline: {
+    position: 'absolute', bottom: 0, right: 0,
+    width: 13, height: 13, borderRadius: 6.5,
+    backgroundColor: C.success, borderWidth: 2, borderColor: C.dark,
   },
-  statIcon: { width: 40, height: 40, borderRadius: 12, alignItems: 'center', justifyContent: 'center', marginBottom: 8 },
-  statValue: { fontSize: 14, fontWeight: '800', color: C.text, textAlign: 'center' },
-  statLabel: { fontSize: 10, color: C.muted, marginTop: 3, textAlign: 'center' },
+  dateChip: {
+    flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: 14,
+    backgroundColor: 'rgba(255,255,255,0.07)',
+    paddingHorizontal: 12, paddingVertical: 6, borderRadius: 20,
+    alignSelf: 'flex-start',
+  },
+  dateChipText: { fontSize: 12, color: 'rgba(255,255,255,0.75)', fontWeight: '600' },
+  dateChipMuted: { fontSize: 12, color: 'rgba(255,255,255,0.4)' },
+
+  // Today card
+  todayCard: { marginHorizontal: 16, marginTop: 14, marginBottom: 6 },
+  todayCardInner: {
+    backgroundColor: C.surface, borderRadius: 20,
+    flexDirection: 'row', overflow: 'hidden',
+    shadowColor: C.primary, shadowOpacity: 0.1, shadowRadius: 16, elevation: 5,
+  },
+  cardAccent: { width: 4 },
+  todayTop: {
+    flexDirection: 'row', alignItems: 'center',
+    justifyContent: 'space-between', padding: 16, paddingBottom: 8,
+  },
+  statusPill: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    paddingHorizontal: 12, paddingVertical: 6, borderRadius: 20,
+  },
+  statusLabel: { fontSize: 12.5, fontWeight: '700' },
+  workedPill: {
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    backgroundColor: C.primaryBg, paddingHorizontal: 10, paddingVertical: 5, borderRadius: 12,
+  },
+  workedText: { fontSize: 12, fontWeight: '700', color: C.primary },
+  lastPunchRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    paddingHorizontal: 16, paddingBottom: 10,
+  },
+  lastPunchText: { fontSize: 12.5, color: C.muted },
+  attendanceBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    backgroundColor: C.dark, borderRadius: 14,
+    paddingVertical: 13, paddingHorizontal: 16, margin: 12, marginTop: 4,
+  },
+  attendanceBtnText: { flex: 1, fontSize: 14, fontWeight: '700', color: '#fff' },
+  btnArrow: {
+    width: 26, height: 26, borderRadius: 13, backgroundColor: 'rgba(255,255,255,0.1)',
+    alignItems: 'center', justifyContent: 'center',
+  },
+
+  // Section label
+  sectionLabel: {
+    fontSize: 11.5, fontWeight: '700', color: C.muted,
+    textTransform: 'uppercase', letterSpacing: 1,
+    paddingHorizontal: 20, marginTop: 22, marginBottom: 10,
+  },
+
+  // Summary
+  summaryRow: { flexDirection: 'row', gap: 8, paddingHorizontal: 16 },
+  summaryCard: {
+    flex: 1, borderRadius: 16, paddingVertical: 14, paddingHorizontal: 6,
+    alignItems: 'center', gap: 4,
+    shadowColor: '#000', shadowOpacity: 0.04, shadowRadius: 6, elevation: 2,
+  },
+  summaryVal: { fontSize: 18, fontWeight: '900' },
+  summaryLbl: { fontSize: 9.5, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.3 },
+
+  // Quick actions
   actionsGrid: {
-    flexDirection: 'row', flexWrap: 'wrap', gap: 12,
-    paddingHorizontal: 20,
+    flexDirection: 'row', flexWrap: 'wrap',
+    paddingHorizontal: 16, gap: 10,
   },
   actionCard: {
-    width: '47%', backgroundColor: C.surface, borderRadius: 16,
-    padding: 16, alignItems: 'center', gap: 10,
+    width: '30.5%',
+    backgroundColor: C.surface, borderRadius: 18,
+    paddingVertical: 18, paddingHorizontal: 10,
+    alignItems: 'center', gap: 8,
     shadowColor: '#000', shadowOpacity: 0.06, shadowRadius: 8, elevation: 3,
+    position: 'relative',
   },
-  actionIcon: { width: 52, height: 52, borderRadius: 14, alignItems: 'center', justifyContent: 'center' },
-  actionLabel: { fontSize: 13, fontWeight: '600', color: C.text, textAlign: 'center' },
-  emptyCard: {
-    marginHorizontal: 20, backgroundColor: C.surface, borderRadius: 16,
-    padding: 32, alignItems: 'center', gap: 8,
-    shadowColor: '#000', shadowOpacity: 0.04, shadowRadius: 8, elevation: 2,
+  actionIconRing: {
+    width: 56, height: 56, borderRadius: 18,
+    alignItems: 'center', justifyContent: 'center',
   },
-  emptyTitle: { fontSize: 15, fontWeight: '600', color: C.text },
-  emptyText: { fontSize: 13, color: C.muted, textAlign: 'center' },
+  actionLabel: {
+    fontSize: 11.5, fontWeight: '600', color: C.text,
+    textAlign: 'center', lineHeight: 16,
+  },
+  actionArrow: {
+    position: 'absolute', top: 10, right: 10,
+  },
 });
