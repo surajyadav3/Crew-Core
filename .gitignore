@@ -7,6 +7,11 @@ yarn-error.*
 .env
 .env*.local
 .DS_Store
+build-output/
+hs_err_pid*.log
+replay_pid*.log
+eas_*.txt
+supabase/.temp/
 
 # Play Store service account key (contains secrets)
 google-play-key.json
