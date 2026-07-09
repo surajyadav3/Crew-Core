@@ -8,10 +8,20 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { useAuth } from '@/context/AuthContext';
 import { fetchMyMonthAttendance } from '@/services/attendanceService';
+import { listMyNotifications, markNotificationRead } from '@/services/notificationService';
 import {
-  todayStr, dateStr, timeStr, diffHours, fmtDuration, monthLabel, fmtTime12,
+  todayStr, dateStr, timeStr, diffHours, fmtDuration, monthLabel, fmtTime12, fmtDate,
 } from '@/lib/helpers';
 import { Colors as C } from '@/constants/Colors';
+
+const UPDATE_ICON: Record<string, keyof typeof Ionicons.glyphMap> = {
+  policy: 'document-text-outline',
+  announcement: 'megaphone-outline',
+  leave_approved: 'checkmark-circle-outline',
+  leave_rejected: 'close-circle-outline',
+  clock_in: 'log-in-outline',
+  clock_out: 'log-out-outline',
+};
 
 const { width: SCREEN_W } = Dimensions.get('window');
 
@@ -119,6 +129,7 @@ export default function DashboardScreen() {
   const [loading, setLoading] = useState(true);
   const [todayRec, setTodayRec] = useState<any>(null);
   const [summary, setSummary] = useState({ present: 0, absent: 0, late: 0, totalHours: 0 });
+  const [updates, setUpdates] = useState<any[]>([]);
   const headerFade = useRef(new Animated.Value(0)).current;
 
   const now = new Date();
@@ -148,7 +159,20 @@ export default function DashboardScreen() {
     }
   }, [profile, tenant]);
 
+  const loadUpdates = useCallback(async () => {
+    if (!profile) return;
+    const { data } = await listMyNotifications(profile.id);
+    setUpdates(data.slice(0, 5));
+  }, [profile]);
+
   useEffect(() => { loadData(); }, [loadData]);
+  useEffect(() => { loadUpdates(); }, [loadUpdates]);
+
+  const handleOpenUpdate = async (n: any) => {
+    if (n.read) return;
+    await markNotificationRead(n.id);
+    setUpdates((prev) => prev.map((x) => (x.id === n.id ? { ...x, read: true } : x)));
+  };
 
   useEffect(() => {
     Animated.timing(headerFade, { toValue: 1, duration: 600, useNativeDriver: true }).start();
@@ -308,6 +332,45 @@ export default function DashboardScreen() {
           </>
         )}
 
+        {/* ── Announcements & Updates ──────────────────────────────────── */}
+        <AnimatedCard delay={250}>
+          <View style={s.sectionHeaderRow}>
+            <Text style={[s.sectionLabel, { marginTop: 0, paddingHorizontal: 0 }]}>Announcements & Updates</Text>
+            {updates.length > 0 && (
+              <TouchableOpacity onPress={() => router.push('/notices' as any)} activeOpacity={0.7}>
+                <Text style={s.seeAllText}>See all</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+          {updates.length === 0 ? (
+            <View style={s.updatesEmpty}>
+              <Ionicons name="notifications-outline" size={22} color={C.muted} />
+              <Text style={s.updatesEmptyText}>You're all caught up. New policies, announcements and approvals will show up here.</Text>
+            </View>
+          ) : (
+            <View style={s.updatesList}>
+              {updates.map((n) => (
+                <TouchableOpacity
+                  key={n.id}
+                  style={[s.updateCard, !n.read && s.updateCardUnread]}
+                  onPress={() => handleOpenUpdate(n)}
+                  activeOpacity={0.85}
+                >
+                  <View style={[s.updateIconWrap, !n.read && { backgroundColor: C.primaryBg }]}>
+                    <Ionicons name={UPDATE_ICON[n.type] || 'notifications-outline'} size={17} color={C.primary} />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={s.updateTitle} numberOfLines={1}>{n.title}</Text>
+                    {!!n.body && <Text style={s.updateBody} numberOfLines={2}>{n.body}</Text>}
+                    <Text style={s.updateTime}>{fmtDate(n.created_at)}</Text>
+                  </View>
+                  {!n.read && <View style={s.updateDot} />}
+                </TouchableOpacity>
+              ))}
+            </View>
+          )}
+        </AnimatedCard>
+
         {/* ── Quick Actions ─────────────────────────────────────────────── */}
         <AnimatedCard delay={300}>
           <Text style={s.sectionLabel}>Quick Actions</Text>
@@ -441,6 +504,34 @@ const s = StyleSheet.create({
   },
   summaryVal: { fontSize: 18, fontWeight: '900' },
   summaryLbl: { fontSize: 9.5, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.3 },
+
+  // Announcements & Updates
+  sectionHeaderRow: {
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+    paddingHorizontal: 20, marginTop: 22, marginBottom: 10,
+  },
+  seeAllText: { fontSize: 12.5, fontWeight: '700', color: C.primary },
+  updatesEmpty: {
+    marginHorizontal: 16, backgroundColor: C.surface, borderRadius: 18,
+    padding: 20, flexDirection: 'row', alignItems: 'center', gap: 12,
+    shadowColor: '#000', shadowOpacity: 0.05, shadowRadius: 8, elevation: 2,
+  },
+  updatesEmptyText: { flex: 1, fontSize: 12.5, color: C.muted, lineHeight: 18 },
+  updatesList: { paddingHorizontal: 16, gap: 10 },
+  updateCard: {
+    flexDirection: 'row', alignItems: 'flex-start', gap: 12,
+    backgroundColor: C.surface, borderRadius: 16, padding: 14,
+    shadowColor: '#000', shadowOpacity: 0.05, shadowRadius: 8, elevation: 2,
+  },
+  updateCardUnread: { borderWidth: 1, borderColor: C.primaryBg },
+  updateIconWrap: {
+    width: 34, height: 34, borderRadius: 11, backgroundColor: C.bg,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  updateTitle: { fontSize: 13.5, fontWeight: '700', color: C.text },
+  updateBody: { fontSize: 12, color: C.muted, marginTop: 2, lineHeight: 17 },
+  updateTime: { fontSize: 10.5, color: '#CBD5E1', marginTop: 4 },
+  updateDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: C.primary, marginTop: 4 },
 
   // Quick actions
   actionsGrid: {

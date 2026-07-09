@@ -7,6 +7,21 @@ export function detectIdentifierType(identifier: string): 'email' | 'phone' | nu
   return null;
 }
 
+// Supabase Auth is keyed by email. To let employees log in with the phone
+// number HR entered on their profile, resolve it to that email first.
+export async function resolveLoginEmail(identifier: string): Promise<string> {
+  const id = identifier.trim();
+  const type = detectIdentifierType(id);
+  if (type === 'email') return id.toLowerCase();
+  if (type === 'phone') {
+    const { data, error } = await supabase.rpc('get_email_by_phone', { p_phone: id });
+    if (error) throw new Error(error.message || 'Failed to look up account.');
+    if (!data) throw new Error('No account found with this phone number. Please contact your admin.');
+    return data as string;
+  }
+  throw new Error('Please enter a valid email address or 10-digit phone number.');
+}
+
 export async function sendOtp(identifier: string): Promise<{ type: string; identifier: string }> {
   const id = identifier.trim().toLowerCase();
   const type = detectIdentifierType(id);

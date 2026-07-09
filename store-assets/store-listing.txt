@@ -1,0 +1,94 @@
+======================================================
+  CREWCORE — GOOGLE PLAY STORE LISTING CONTENT
+======================================================
+
+--- TITLE (max 50 chars) ---
+CrewCore – Employee Self-Service
+
+
+--- SHORT DESCRIPTION (max 80 chars) ---
+Clock in, manage leaves & view payslips — all in one place.
+
+
+--- FULL DESCRIPTION (max 4000 chars) ---
+CrewCore is the employee self-service app that puts your work life in your pocket. Designed for teams that want a simple, fast way to manage daily HR tasks without the paperwork.
+
+━━ CLOCK IN & OUT ━━
+Mark your attendance with a single tap. CrewCore uses GPS verification to confirm you're at the right location before logging your check-in — no buddy punching, no disputes.
+
+━━ ATTENDANCE HISTORY ━━
+View your full attendance calendar at a glance. See which days you were present, late, or absent with colour-coded daily markers and a timeline of your exact check-in/check-out times.
+
+━━ LEAVE MANAGEMENT ━━
+Request leave directly from your phone in seconds. Choose the leave type, set the date range, add a reason, and submit — your manager gets notified instantly. Track pending, approved, and rejected requests all in one list.
+
+━━ PAYSLIP VIEWER ━━
+Access your monthly payslips anytime, anywhere. Earnings, deductions, and net pay are clearly laid out. Sensitive figures are hidden by default and revealed with a single tap for your privacy.
+
+━━ SECURE & PRIVATE ━━
+Your data is stored securely. Authentication is handled with industry-standard encrypted sessions. You only see your own records — no access to other employees' data.
+
+━━ BUILT FOR TEAMS ━━
+CrewCore works alongside your company's HR system. Everything is synced in real time, so your manager always has up-to-date information.
+
+──────────────────────────────
+KEY FEATURES
+• One-tap GPS-verified clock in/out
+• Monthly attendance calendar & daily timeline
+• Leave request & approval tracking
+• Secure payslip viewer with reveal toggle
+• Dashboard with present days & leave balance
+• Clean, fast UI with dark mode support
+──────────────────────────────
+
+Note: CrewCore is a company-deployed app. You must have an active account set up by your employer to sign in.
+
+
+--- APP CATEGORY ---
+Business
+
+
+--- TAGS / KEYWORDS ---
+attendance, clock in, HR, payslip, leave management, employee, workforce, timesheet, shift, payroll
+
+
+--- CONTENT RATING ---
+Everyone (no violence, no adult content, no user-generated public content)
+
+
+--- CONTACT EMAIL (for Play Store listing) ---
+prakashgovtportal@gmail.com
+
+
+======================================================
+  SCREENSHOTS — WHICH SCREENS TO CAPTURE
+======================================================
+
+Capture these 5 screens in portrait mode (recommended: 1080x1920px or your device resolution):
+
+  1. LOGIN SCREEN          — app open before signing in
+  2. DASHBOARD (HOME)      — after login, showing stats cards
+  3. ATTENDANCE SCREEN     — clock-in button + calendar view
+  4. LEAVES SCREEN         — leave list + request button
+  5. PAYSLIPS SCREEN       — payslip list (salary hidden)
+
+HOW TO TAKE SCREENSHOTS:
+  Option A — Physical Android device:
+    • Run the app, navigate to each screen
+    • Press Power + Volume Down to screenshot
+    • Screenshots saved to your Photos/Screenshots folder
+
+  Option B — Android Emulator (Android Studio):
+    • Start emulator: run  npx expo start --android
+    • In Android Studio emulator toolbar, click the camera icon
+    • Or use:  adb exec-out screencap -p > screenshot.png
+
+  Option C — ADB (device connected via USB):
+    adb exec-out screencap -p > "D:\CrewCore\store-assets\screen1_login.png"
+    (navigate to each screen and repeat for each)
+
+AFTER CAPTURING:
+    Upload all 5 screenshots in Play Console →
+    Main store listing → Screenshots → Phone
+
+======================================================

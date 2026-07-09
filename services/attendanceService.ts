@@ -2,6 +2,20 @@ import { supabase } from '@/lib/supabase';
 import { todayStr, timeStr, diffHours } from '@/lib/helpers';
 import { getOrCreateQuota, determineApproverRole, incrementSelfCount } from './requestQuotaService';
 
+function sendPunchNotification(tenantId: string, profileId: string, punchType: 'in' | 'out') {
+  supabase.functions.invoke('send-notification', {
+    body: {
+      tenant_id: tenantId,
+      target: `user:${profileId}`,
+      type: punchType === 'in' ? 'clock_in' : 'clock_out',
+      title: punchType === 'in' ? 'Clocked In ✅' : 'Clocked Out 👋',
+      body: punchType === 'in'
+        ? `You clocked in at ${timeStr(new Date())}.`
+        : `You clocked out at ${timeStr(new Date())}.`,
+    },
+  }).catch((err) => console.error('[CrewCore] send-notification (punch) error:', err));
+}
+
 export async function fetchMyMonthAttendance(profileId: string, year: number, month: number) {
   const startDate = `${year}-${String(month + 1).padStart(2, '0')}-01`;
   const endDay = new Date(year, month + 1, 0).getDate();
@@ -83,6 +97,8 @@ export async function clockIn(tenantId: string, profileId: string, tenant: any, 
     .from('punches')
     .insert([{ attendance_id: attId, punch_time: timeStr(new Date()), punch_type: 'in' }]);
   if (punchErr) throw punchErr;
+
+  sendPunchNotification(tenantId, profileId, 'in');
 }
 
 export async function submitRegularizeRequest(
@@ -178,6 +194,8 @@ export async function clockOut(profileId: string, locationData: { lat: number; l
       punch_out_lng: locationData?.lng,
     })
     .eq('id', att.id);
+
+  sendPunchNotification(att.tenant_id, profileId, 'out');
 
   return { total };
 }

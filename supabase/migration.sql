@@ -188,6 +188,58 @@ ALTER TABLE leave_requests DROP CONSTRAINT IF EXISTS leave_requests_leave_type_c
 CREATE INDEX IF NOT EXISTS idx_leave_requests_profile ON leave_requests(profile_id);
 CREATE INDEX IF NOT EXISTS idx_leave_requests_tenant  ON leave_requests(tenant_id, status);
 
+CREATE TABLE IF NOT EXISTS push_tokens (
+  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  profile_id  uuid NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+  tenant_id   uuid NOT NULL REFERENCES tenants(id)  ON DELETE CASCADE,
+  token       text NOT NULL UNIQUE,
+  device_type text NOT NULL DEFAULT 'unknown',
+  updated_at  timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_push_tokens_profile ON push_tokens(profile_id);
+CREATE INDEX IF NOT EXISTS idx_push_tokens_tenant  ON push_tokens(tenant_id);
+
+-- NOTE: pre-existing table from the crewcore.in web app — kept here only so a fresh
+-- install ends up with the same shape (pdf_url/pdf_name for attached policy documents).
+CREATE TABLE IF NOT EXISTS policies (
+  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id   uuid REFERENCES tenants(id)  ON DELETE CASCADE,
+  created_by  uuid REFERENCES profiles(id) ON DELETE CASCADE,
+  title       text NOT NULL,
+  body        text NOT NULL DEFAULT '',
+  pdf_url     text NOT NULL DEFAULT '',
+  pdf_name    text NOT NULL DEFAULT '',
+  created_at  timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_policies_tenant ON policies(tenant_id, created_at DESC);
+
+-- NOTE: pre-existing table from the crewcore.in web app — kept here only so a fresh
+-- install ends up with the same shape. Uses `message` (not `body`) and a `department`
+-- column for department-scoped delivery (default 'All' = everyone).
+CREATE TABLE IF NOT EXISTS announcements (
+  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id   uuid REFERENCES tenants(id)  ON DELETE CASCADE,
+  created_by  uuid REFERENCES profiles(id) ON DELETE CASCADE,
+  department  text NOT NULL DEFAULT 'All',
+  title       text NOT NULL,
+  message     text NOT NULL,
+  created_at  timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_announcements_tenant ON announcements(tenant_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS notifications (
+  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id   uuid NOT NULL REFERENCES tenants(id)  ON DELETE CASCADE,
+  profile_id  uuid NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+  type        text NOT NULL,
+  title       text NOT NULL,
+  body        text NOT NULL DEFAULT '',
+  data        jsonb NOT NULL DEFAULT '{}'::jsonb,
+  read        boolean NOT NULL DEFAULT false,
+  created_at  timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_notifications_profile ON notifications(profile_id, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS attendance_audit_log (
   id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   tenant_id       uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
@@ -222,6 +274,10 @@ ALTER TABLE advances              ENABLE ROW LEVEL SECURITY;
 ALTER TABLE otp_table             ENABLE ROW LEVEL SECURITY;
 ALTER TABLE leave_requests        ENABLE ROW LEVEL SECURITY;
 ALTER TABLE attendance_audit_log  ENABLE ROW LEVEL SECURITY;
+ALTER TABLE push_tokens            ENABLE ROW LEVEL SECURITY;
+ALTER TABLE policies                ENABLE ROW LEVEL SECURITY;
+ALTER TABLE announcements            ENABLE ROW LEVEL SECURITY;
+ALTER TABLE notifications             ENABLE ROW LEVEL SECURITY;
 
 CREATE OR REPLACE FUNCTION my_tenant_id()
 RETURNS uuid LANGUAGE sql STABLE SECURITY DEFINER AS $$
@@ -450,6 +506,48 @@ CREATE POLICY "audit_log: admin/manager can insert"
   ON attendance_audit_log FOR INSERT
   WITH CHECK (tenant_id = my_tenant_id() AND my_role() IN ('admin','manager','superadmin'));
 
+-- ---- push_tokens ----
+DROP POLICY IF EXISTS "push_tokens: user manages own" ON push_tokens;
+
+CREATE POLICY "push_tokens: user manages own"
+  ON push_tokens FOR ALL
+  USING (profile_id = auth.uid())
+  WITH CHECK (profile_id = auth.uid() AND tenant_id = my_tenant_id());
+
+-- ---- policies ----
+DROP POLICY IF EXISTS "policies: tenant members can read" ON policies;
+DROP POLICY IF EXISTS "policies: admin/superadmin can write" ON policies;
+
+CREATE POLICY "policies: tenant members can read"
+  ON policies FOR SELECT USING (tenant_id = my_tenant_id());
+
+CREATE POLICY "policies: admin/superadmin can write"
+  ON policies FOR ALL
+  USING (tenant_id = my_tenant_id() AND my_role() IN ('admin','superadmin'))
+  WITH CHECK (tenant_id = my_tenant_id() AND my_role() IN ('admin','superadmin'));
+
+-- ---- announcements ----
+DROP POLICY IF EXISTS "announcements: tenant members can read" ON announcements;
+DROP POLICY IF EXISTS "announcements: admin/superadmin can write" ON announcements;
+
+CREATE POLICY "announcements: tenant members can read"
+  ON announcements FOR SELECT USING (tenant_id = my_tenant_id());
+
+CREATE POLICY "announcements: admin/superadmin can write"
+  ON announcements FOR ALL
+  USING (tenant_id = my_tenant_id() AND my_role() IN ('admin','superadmin'))
+  WITH CHECK (tenant_id = my_tenant_id() AND my_role() IN ('admin','superadmin'));
+
+-- ---- notifications ----
+DROP POLICY IF EXISTS "notifications: user sees own" ON notifications;
+DROP POLICY IF EXISTS "notifications: user can mark own read" ON notifications;
+
+CREATE POLICY "notifications: user sees own"
+  ON notifications FOR SELECT USING (profile_id = auth.uid());
+
+CREATE POLICY "notifications: user can mark own read"
+  ON notifications FOR UPDATE USING (profile_id = auth.uid());
+
 
 -- =============================================================
 -- 3. RPC FUNCTIONS
@@ -603,11 +701,115 @@ BEGIN
 END;
 $$;
 
+-- Resolves a phone number (as entered by HR on the employee's profile) to the
+-- email address their Supabase Auth account was created with, so the login
+-- screen can accept either identifier while auth itself stays email-based.
+-- Runs pre-login (anon), so it only ever returns an email — never other
+-- profile fields — and only for Active employees.
+DROP FUNCTION IF EXISTS get_email_by_phone(text);
+CREATE OR REPLACE FUNCTION get_email_by_phone(p_phone text)
+RETURNS text
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  SELECT email FROM profiles
+  WHERE phone = trim(p_phone) AND status = 'Active' AND email <> ''
+  LIMIT 1;
+$$;
+
 GRANT EXECUTE ON FUNCTION create_workspace(text,text,text,uuid)                                                      TO anon, authenticated;
 GRANT EXECUTE ON FUNCTION insert_employee_profile(uuid,text,text,text,text,text,text,numeric,date,text,text,text,text) TO authenticated;
 GRANT EXECUTE ON FUNCTION lookup_org(text)                                                                           TO anon, authenticated;
 GRANT EXECUTE ON FUNCTION employee_join_workspace(text,text,text,uuid)                                               TO anon, authenticated;
 GRANT EXECUTE ON FUNCTION clear_must_change_password()                                                               TO authenticated;
+GRANT EXECUTE ON FUNCTION get_email_by_phone(text)                                                                   TO anon, authenticated;
+
+
+-- =============================================================
+-- 3b. PUSH NOTIFICATION TRIGGERS (policies, announcements, leave decisions)
+-- =============================================================
+-- Requires the pg_net extension (bundled on Supabase-hosted Postgres) to make
+-- an outbound HTTP call from a trigger to the `send-notification` edge function.
+--
+-- ONE-TIME MANUAL STEP after running this migration:
+--   select vault.create_secret('https://<project-ref>.functions.supabase.co/send-notification', 'edge_function_url');
+--   select vault.create_secret('<service-role-key>', 'edge_function_service_key');
+-- (Replace <project-ref> and <service-role-key> with your project's values —
+-- never commit the actual service-role key into this file.)
+
+CREATE EXTENSION IF NOT EXISTS pg_net;
+
+CREATE OR REPLACE FUNCTION notify_via_edge_function(payload jsonb)
+RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  v_url text;
+  v_key text;
+BEGIN
+  SELECT decrypted_secret INTO v_url FROM vault.decrypted_secrets WHERE name = 'edge_function_url';
+  SELECT decrypted_secret INTO v_key FROM vault.decrypted_secrets WHERE name = 'edge_function_service_key';
+  IF v_url IS NULL OR v_key IS NULL THEN
+    RAISE WARNING 'edge_function_url / edge_function_service_key not set in Vault — skipping push notification';
+    RETURN;
+  END IF;
+  PERFORM net.http_post(
+    url := v_url,
+    headers := jsonb_build_object('Content-Type', 'application/json', 'Authorization', 'Bearer ' || v_key),
+    body := payload
+  );
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION trg_notify_policy_created()
+RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  PERFORM notify_via_edge_function(jsonb_build_object(
+    'tenant_id', NEW.tenant_id, 'target', 'all', 'type', 'policy',
+    'title', 'New Policy: ' || NEW.title, 'body', left(NEW.body, 160)
+  ));
+  RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS on_policy_created ON policies;
+CREATE TRIGGER on_policy_created AFTER INSERT ON policies
+  FOR EACH ROW EXECUTE FUNCTION trg_notify_policy_created();
+
+-- NOTE: the `announcements` table pre-existed (from the crewcore.in web app) with a
+-- `message` column (not `body`) and a `department` column (default 'All'). This trigger
+-- targets 'all' regardless of department — department-scoped delivery is handled by the
+-- table's own RLS read policy, not by this push dispatch.
+CREATE OR REPLACE FUNCTION trg_notify_announcement_created()
+RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  PERFORM notify_via_edge_function(jsonb_build_object(
+    'tenant_id', NEW.tenant_id, 'target', 'all', 'type', 'announcement',
+    'title', 'Announcement: ' || NEW.title, 'body', left(NEW.message, 160)
+  ));
+  RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS on_announcement_created ON announcements;
+CREATE TRIGGER on_announcement_created AFTER INSERT ON announcements
+  FOR EACH ROW EXECUTE FUNCTION trg_notify_announcement_created();
+
+CREATE OR REPLACE FUNCTION trg_notify_leave_status_changed()
+RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  IF NEW.status IS DISTINCT FROM OLD.status AND NEW.status IN ('Approved', 'Rejected') THEN
+    PERFORM notify_via_edge_function(jsonb_build_object(
+      'tenant_id', NEW.tenant_id, 'target', 'user:' || NEW.profile_id,
+      'type', CASE WHEN NEW.status = 'Approved' THEN 'leave_approved' ELSE 'leave_rejected' END,
+      'title', CASE WHEN NEW.status = 'Approved' THEN 'Leave Approved' ELSE 'Leave Rejected' END,
+      'body', NEW.leave_type || ' (' || NEW.start_date || ' to ' || NEW.end_date || ') was ' || lower(NEW.status) || '.'
+    ));
+  END IF;
+  RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS on_leave_status_changed ON leave_requests;
+CREATE TRIGGER on_leave_status_changed AFTER UPDATE OF status ON leave_requests
+  FOR EACH ROW EXECUTE FUNCTION trg_notify_leave_status_changed();
 
 
 -- =============================================================

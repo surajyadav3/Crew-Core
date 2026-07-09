@@ -18,7 +18,7 @@ import {
   todayStr, dateStr, timeStr, fmtTime12, diffHours, fmtDuration, monthLabel,
   calculateDistance, fmtLiveClock, fmtLiveDate,
 } from '@/lib/helpers';
-import { useNotification } from '@/lib/notifications';
+import { presentLocalNotification } from '@/lib/pushNotifications';
 
 import { Colors as C } from '@/constants/Colors';
 
@@ -76,7 +76,6 @@ function StatusPulse({ active }: { active: boolean }) {
 
 export default function AttendanceScreen() {
   const { profile, tenant } = useAuth();
-  const { notify } = useNotification();
   const [attMonth, setAttMonth] = useState(new Date().getMonth());
   const [attYear, setAttYear] = useState(new Date().getFullYear());
   const [myRecords, setMyRecords] = useState<any[]>([]);
@@ -198,7 +197,7 @@ export default function AttendanceScreen() {
       await svcClockIn(tenant.id, profile.id, tenant, loc.lat !== 0 ? loc : null);
       const inTime = fmtTime12(timeStr(new Date()));
       showToast(`Clocked in at ${inTime}`, 'success');
-      notify('Clocked In ✓', `You clocked in at ${inTime}`, 'success');
+      presentLocalNotification('Clocked In ✓', `You clocked in at ${inTime}`, { type: 'clock_in' });
       fetchData();
     } catch (err: any) {
       showToast('Clock in failed: ' + err.message, 'error');
@@ -217,7 +216,7 @@ export default function AttendanceScreen() {
       const { total } = await svcClockOut(profile!.id, loc.lat !== 0 ? loc : null);
       const worked = fmtDuration(total);
       showToast(`Clocked out. Worked ${worked}`, 'success');
-      notify('Clocked Out', `You worked ${worked} today.`, 'info');
+      presentLocalNotification('Clocked Out', `You worked ${worked} today.`, { type: 'clock_out' });
       fetchData();
       maybeAskReview();
     } catch (err: any) {

@@ -3,24 +3,24 @@
     "name": "CrewCore",
     "slug": "crew-core",
     "scheme": "crew-core",
-    "version": "1.0.9",
+    "version": "1.1.1",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
     "splash": {
       "image": "./assets/splash.png",
       "resizeMode": "contain",
-      "backgroundColor": "#ffffff"
+      "backgroundColor": "#080D1A"
     },
     "ios": {
       "supportsTablet": true
     },
     "android": {
       "package": "com.crewcore.app",
-      "versionCode": 23,
+      "versionCode": 26,
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
-        "backgroundColor": "#ffffff"
+        "backgroundColor": "#0A0816"
       },
       "permissions": [
         "ACCESS_FINE_LOCATION",
@@ -46,11 +46,21 @@
         "expo-build-properties",
         {
           "android": {
-            "compileSdkVersion": 34,
-            "targetSdkVersion": 35
+            "compileSdkVersion": 35,
+            "targetSdkVersion": 35,
+            "ndkVersion": "27.0.12077973"
           }
         }
-      ]
+      ],
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/icon.png",
+          "color": "#6C5CE7"
+        }
+      ],
+      "expo-font",
+      "expo-asset"
     ],
     "experiments": {
       "typedRoutes": true

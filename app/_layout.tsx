@@ -3,140 +3,219 @@ import React, { useEffect, useRef, useState } from 'react';
 import { View, Text, TextInput, TouchableOpacity, Alert, Animated, StyleSheet, Dimensions, Easing } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Font from 'expo-font';
-import { Stack } from 'expo-router';
+import {
+  Outfit_400Regular,
+  Outfit_500Medium,
+  Outfit_600SemiBold,
+  Outfit_700Bold,
+  Outfit_800ExtraBold,
+} from '@expo-google-fonts/outfit';
+import { Stack, useRootNavigationState } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { Ionicons } from '@expo/vector-icons';
 import * as SplashScreen from 'expo-splash-screen';
 import { AuthProvider } from '@/context/AuthContext';
 import { ToastProvider } from '@/components/Toast';
-import { NotificationProvider } from '@/components/NotificationBanner';
+import { initNotificationResponseListener, markNavigationReady } from '@/lib/pushNotifications';
 
 SplashScreen.preventAutoHideAsync().catch(() => {});
 
 const { width: W, height: H } = Dimensions.get('window');
 
-const BG      = '#0C0C15';
-const PRIMARY = '#8B7CF8';
-const RING    = 'rgba(139,124,248,0.18)';
+const BG      = '#080D1A';
+const PRIMARY = '#6C5CE7';
+const ACCENT  = '#A78BFA';
 
-// ── Star particle ──────────────────────────────────────────────────────────────
-function Star({ x, y, size, delay }: { x: number; y: number; size: number; delay: number }) {
+// ── Ambient orb (large blurry colour blob) ─────────────────────────────────────
+function Orb({ cx, cy, size, color, delay }: { cx: number; cy: number; size: number; color: string; delay: number }) {
   const opacity = useRef(new Animated.Value(0)).current;
+  const scale   = useRef(new Animated.Value(0.85)).current;
   useEffect(() => {
-    Animated.loop(
-      Animated.sequence([
-        Animated.delay(delay),
-        Animated.timing(opacity, { toValue: 0.7, duration: 800, useNativeDriver: true }),
-        Animated.timing(opacity, { toValue: 0.1, duration: 1200, useNativeDriver: true }),
-        Animated.timing(opacity, { toValue: 0, duration: 400, useNativeDriver: true }),
-        Animated.delay(Math.random() * 1000),
-      ])
-    ).start();
-  }, []);
-  return <Animated.View style={{ position: 'absolute', left: x, top: y, width: size, height: size, borderRadius: size / 2, backgroundColor: '#ffffff', opacity }} />;
-}
-
-// ── Glow ring ──────────────────────────────────────────────────────────────────
-function GlowRing({ delay, baseSize }: { delay: number; baseSize: number }) {
-  const scale   = useRef(new Animated.Value(0.4)).current;
-  const opacity = useRef(new Animated.Value(0)).current;
-  useEffect(() => {
-    Animated.loop(
-      Animated.sequence([
-        Animated.delay(delay),
-        Animated.parallel([
-          Animated.timing(scale,   { toValue: 1, duration: 1600, easing: Easing.out(Easing.ease), useNativeDriver: true }),
-          Animated.sequence([
-            Animated.timing(opacity, { toValue: 0.6, duration: 300, useNativeDriver: true }),
-            Animated.timing(opacity, { toValue: 0,   duration: 1300, useNativeDriver: true }),
-          ]),
-        ]),
-        Animated.timing(scale, { toValue: 0.4, duration: 0, useNativeDriver: true }),
-      ])
-    ).start();
+    Animated.sequence([
+      Animated.delay(delay),
+      Animated.parallel([
+        Animated.timing(opacity, { toValue: 1, duration: 1000, useNativeDriver: true }),
+        Animated.timing(scale,   { toValue: 1,  duration: 1200, easing: Easing.out(Easing.ease), useNativeDriver: true }),
+      ]),
+    ]).start(() => {
+      Animated.loop(
+        Animated.sequence([
+          Animated.timing(scale, { toValue: 1.06, duration: 3000, easing: Easing.inOut(Easing.ease), useNativeDriver: true }),
+          Animated.timing(scale, { toValue: 1.00, duration: 3000, easing: Easing.inOut(Easing.ease), useNativeDriver: true }),
+        ])
+      ).start();
+    });
   }, []);
   return (
     <Animated.View style={{
       position: 'absolute',
-      width: baseSize, height: baseSize, borderRadius: baseSize / 2,
-      borderWidth: 1, borderColor: PRIMARY,
+      left: cx - size / 2, top: cy - size / 2,
+      width: size, height: size, borderRadius: size / 2,
+      backgroundColor: color,
+      opacity, transform: [{ scale }],
+    }} />
+  );
+}
+
+// ── Pulse ring that expands outward ────────────────────────────────────────────
+function PulseRing({ delay, size }: { delay: number; size: number }) {
+  const scale   = useRef(new Animated.Value(0.5)).current;
+  const opacity = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    const run = () =>
+      Animated.sequence([
+        Animated.delay(delay),
+        Animated.parallel([
+          Animated.timing(scale,   { toValue: 1, duration: 1800, easing: Easing.out(Easing.ease), useNativeDriver: true }),
+          Animated.sequence([
+            Animated.timing(opacity, { toValue: 0.45, duration: 250, useNativeDriver: true }),
+            Animated.timing(opacity, { toValue: 0,    duration: 1550, useNativeDriver: true }),
+          ]),
+        ]),
+        Animated.parallel([
+          Animated.timing(scale,   { toValue: 0.5, duration: 0, useNativeDriver: true }),
+        ]),
+      ]);
+    Animated.loop(run()).start();
+  }, []);
+  return (
+    <Animated.View style={{
+      position: 'absolute',
+      width: size, height: size, borderRadius: size / 2,
+      borderWidth: 1, borderColor: ACCENT,
       opacity, transform: [{ scale }],
     }} />
   );
 }
 
 // ── Splash overlay ─────────────────────────────────────────────────────────────
+const APP_NAME = 'CrewCore';
+
 function SplashOverlay({ onDone }: { onDone: () => void }) {
   const logoScale   = useRef(new Animated.Value(0)).current;
   const logoOpacity = useRef(new Animated.Value(0)).current;
-  const logoGlow    = useRef(new Animated.Value(0)).current;
-  const nameY       = useRef(new Animated.Value(24)).current;
-  const nameOpacity = useRef(new Animated.Value(0)).current;
+  const shineX      = useRef(new Animated.Value(-120)).current;
   const tagOpacity  = useRef(new Animated.Value(0)).current;
-  const barScale    = useRef(new Animated.Value(0)).current;
+  const tagY        = useRef(new Animated.Value(10)).current;
+  const progressW   = useRef(new Animated.Value(0)).current;
   const exitOpacity = useRef(new Animated.Value(1)).current;
+  const exitScale   = useRef(new Animated.Value(1)).current;
 
-  const STARS = Array.from({ length: 30 }, (_, i) => ({
-    x: Math.random() * W,
-    y: Math.random() * H,
-    size: Math.random() * 2 + 1,
-    delay: Math.random() * 2000,
-  }));
+  // One animated value per character
+  const charValues = useRef(
+    APP_NAME.split('').map(() => ({
+      opacity: new Animated.Value(0),
+      y:       new Animated.Value(18),
+    }))
+  ).current;
 
   useEffect(() => {
     SplashScreen.hideAsync().catch(() => {});
+
+    // Phase 1 — Logo springs in (0 ms)
+    Animated.parallel([
+      Animated.spring(logoScale,   { toValue: 1, useNativeDriver: true, damping: 9, stiffness: 200, mass: 0.7 }),
+      Animated.timing(logoOpacity, { toValue: 1, duration: 220, useNativeDriver: true }),
+    ]).start();
+
+    // Phase 2 — Shine sweeps across logo plate (300 ms)
     Animated.sequence([
-      Animated.parallel([
-        Animated.spring(logoScale,   { toValue: 1, useNativeDriver: true, damping: 11, stiffness: 180, mass: 0.8 }),
-        Animated.timing(logoOpacity, { toValue: 1, duration: 300, useNativeDriver: true }),
-        Animated.timing(logoGlow,    { toValue: 1, duration: 600, useNativeDriver: true }),
-      ]),
-      Animated.parallel([
-        Animated.spring(nameY,      { toValue: 0, useNativeDriver: true, damping: 14, stiffness: 160 }),
-        Animated.timing(nameOpacity,{ toValue: 1, duration: 350, useNativeDriver: true }),
-      ]),
-      Animated.timing(tagOpacity,  { toValue: 1, duration: 300, useNativeDriver: true }),
-      Animated.spring(barScale,    { toValue: 1, useNativeDriver: true, damping: 12, stiffness: 120 }),
+      Animated.delay(300),
+      Animated.timing(shineX, { toValue: 120, duration: 380, easing: Easing.out(Easing.ease), useNativeDriver: true }),
+    ]).start();
+
+    // Phase 3 — Characters stagger in (420 ms base, 55 ms apart)
+    APP_NAME.split('').forEach((_, i) => {
+      Animated.sequence([
+        Animated.delay(420 + i * 55),
+        Animated.parallel([
+          Animated.spring(charValues[i].y, { toValue: 0, useNativeDriver: true, damping: 11, stiffness: 220 }),
+          Animated.timing(charValues[i].opacity, { toValue: 1, duration: 200, useNativeDriver: true }),
+        ]),
+      ]).start();
+    });
+
+    // Phase 4 — Tagline slides up (900 ms)
+    Animated.sequence([
       Animated.delay(900),
-      Animated.timing(exitOpacity, { toValue: 0, duration: 500, easing: Easing.in(Easing.ease), useNativeDriver: true }),
+      Animated.parallel([
+        Animated.spring(tagY,      { toValue: 0, useNativeDriver: true, damping: 13, stiffness: 180 }),
+        Animated.timing(tagOpacity,{ toValue: 1, duration: 320, useNativeDriver: true }),
+      ]),
+    ]).start();
+
+    // Phase 5 — Progress line draws (1050 ms → 1750 ms)
+    Animated.sequence([
+      Animated.delay(1050),
+      Animated.timing(progressW, { toValue: 1, duration: 700, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
+    ]).start();
+
+    // Phase 6 — Exit: scale up + fade out (2050 ms)
+    Animated.sequence([
+      Animated.delay(2050),
+      Animated.parallel([
+        Animated.timing(exitOpacity, { toValue: 0, duration: 420, easing: Easing.in(Easing.ease), useNativeDriver: true }),
+        Animated.timing(exitScale,   { toValue: 1.07, duration: 420, easing: Easing.in(Easing.ease), useNativeDriver: true }),
+      ]),
     ]).start(onDone);
   }, []);
 
-  const glowOpacity = logoGlow.interpolate({ inputRange: [0, 1], outputRange: [0, 0.35] });
+  const progressBarWidth = progressW.interpolate({ inputRange: [0, 1], outputRange: ['0%', '100%'] });
 
   return (
-    <Animated.View style={[sp.overlay, { opacity: exitOpacity }]} pointerEvents="none">
-      {/* Stars */}
-      {STARS.map((s, i) => <Star key={i} {...s} />)}
+    <Animated.View
+      style={[sp.overlay, { opacity: exitOpacity, transform: [{ scale: exitScale }] }]}
+      pointerEvents="none"
+    >
+      {/* Ambient orbs */}
+      <Orb cx={W * 0.15} cy={H * 0.22} size={300} color="rgba(37,99,235,0.14)" delay={0} />
+      <Orb cx={W * 0.88} cy={H * 0.72} size={260} color="rgba(99,102,241,0.10)" delay={200} />
+      <Orb cx={W * 0.5}  cy={H * 0.9}  size={200} color="rgba(59,130,246,0.09)" delay={400} />
 
-      {/* Glow rings */}
-      <GlowRing delay={0}    baseSize={160} />
-      <GlowRing delay={600}  baseSize={240} />
-      <GlowRing delay={1200} baseSize={320} />
+      {/* Pulse rings behind logo */}
+      <PulseRing delay={0}    size={180} />
+      <PulseRing delay={700}  size={260} />
+      <PulseRing delay={1400} size={340} />
 
-      {/* Logo */}
+      {/* ── Logo ─────────────────────────────────────────── */}
       <Animated.View style={{ opacity: logoOpacity, transform: [{ scale: logoScale }], alignItems: 'center' }}>
-        {/* Outer glow */}
-        <Animated.View style={[sp.logoGlow, { opacity: glowOpacity }]} />
         <View style={sp.logoBox}>
-          <Ionicons name="briefcase" size={38} color="#fff" />
+          <Ionicons name="briefcase" size={40} color="#fff" />
+          {/* Shine sweep */}
+          <Animated.View
+            style={[sp.shine, { transform: [{ translateX: shineX }, { rotate: '20deg' }] }]}
+          />
         </View>
       </Animated.View>
 
-      {/* Name */}
-      <Animated.Text style={[sp.appName, { opacity: nameOpacity, transform: [{ translateY: nameY }] }]}>
-        CrewCore
-      </Animated.Text>
+      {/* ── App name (per-character) ──────────────────────── */}
+      <View style={sp.nameRow}>
+        {APP_NAME.split('').map((char, i) => (
+          <Animated.Text
+            key={i}
+            style={[
+              sp.nameChar,
+              i < 4 ? sp.nameWhite : sp.nameBlue,
+              { opacity: charValues[i].opacity, transform: [{ translateY: charValues[i].y }] },
+            ]}
+          >
+            {char}
+          </Animated.Text>
+        ))}
+      </View>
 
-      {/* Tagline */}
-      <Animated.Text style={[sp.tagline, { opacity: tagOpacity }]}>
+      {/* ── Tagline ───────────────────────────────────────── */}
+      <Animated.Text style={[sp.tagline, { opacity: tagOpacity, transform: [{ translateY: tagY }] }]}>
         Smart Payroll · Modern Teams
       </Animated.Text>
 
-      {/* Bottom bar */}
-      <Animated.View style={[sp.bottomBar, { transform: [{ scaleX: barScale }] }]}>
-        <View style={sp.bottomBarFill} />
-      </Animated.View>
+      {/* ── Progress line ─────────────────────────────────── */}
+      <View style={sp.progressTrack}>
+        <Animated.View style={[sp.progressFill, { width: progressBarWidth }]} />
+      </View>
+
+      {/* ── Version ───────────────────────────────────────── */}
+      <Animated.Text style={[sp.version, { opacity: tagOpacity }]}>v1.1.0</Animated.Text>
     </Animated.View>
   );
 }
@@ -148,34 +227,50 @@ const sp = StyleSheet.create({
     alignItems: 'center', justifyContent: 'center',
     zIndex: 999, elevation: 999,
   },
-  logoGlow: {
-    position: 'absolute',
-    width: 130, height: 130, borderRadius: 65,
-    backgroundColor: PRIMARY,
-  },
   logoBox: {
-    width: 88, height: 88, borderRadius: 26,
+    width: 92, height: 92, borderRadius: 28,
     backgroundColor: PRIMARY,
     alignItems: 'center', justifyContent: 'center',
-    shadowColor: PRIMARY, shadowOpacity: 0.9, shadowRadius: 30, elevation: 20,
-    borderWidth: 1, borderColor: 'rgba(255,255,255,0.15)',
-    marginBottom: 30,
+    shadowColor: PRIMARY, shadowOpacity: 0.8, shadowRadius: 36, elevation: 24,
+    borderWidth: 1, borderColor: 'rgba(255,255,255,0.18)',
+    marginBottom: 34,
+    overflow: 'hidden',
   },
-  appName: {
-    fontSize: 42, fontWeight: '900', color: '#F0F0FF',
-    letterSpacing: -1.5, marginBottom: 10,
+  shine: {
+    position: 'absolute',
+    top: 0, bottom: 0,
+    width: 40,
+    backgroundColor: 'rgba(255,255,255,0.28)',
   },
+  nameRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    marginBottom: 12,
+  },
+  nameChar: {
+    fontSize: 44, fontWeight: '900', letterSpacing: -1,
+  },
+  nameWhite: { color: '#F0F6FF' },
+  nameBlue:  { color: ACCENT },
   tagline: {
-    fontSize: 13, fontWeight: '500',
-    color: 'rgba(240,240,255,0.35)', letterSpacing: 1.5,
-    textTransform: 'uppercase', marginBottom: 60,
+    fontSize: 11, fontWeight: '500',
+    color: 'rgba(148,163,184,0.7)', letterSpacing: 2.2,
+    textTransform: 'uppercase', marginBottom: 52,
   },
-  bottomBar: {
+  progressTrack: {
     position: 'absolute', bottom: H * 0.1,
-    width: 48, height: 3, borderRadius: 2, overflow: 'hidden',
+    width: 120, height: 2, borderRadius: 1,
+    backgroundColor: 'rgba(255,255,255,0.07)',
+    overflow: 'hidden',
   },
-  bottomBarFill: {
-    flex: 1, backgroundColor: PRIMARY, borderRadius: 2,
+  progressFill: {
+    height: '100%', borderRadius: 1,
+    backgroundColor: ACCENT,
+    shadowColor: ACCENT, shadowOpacity: 1, shadowRadius: 4,
+  },
+  version: {
+    position: 'absolute', bottom: H * 0.1 - 22,
+    fontSize: 10, color: 'rgba(148,163,184,0.35)', letterSpacing: 1,
   },
 });
 
@@ -270,11 +365,11 @@ export default function RootLayout() {
     async function loadFonts() {
       try {
         await Font.loadAsync({
-          'Outfit-Regular': 'https://cdn.jsdelivr.net/npm/@fontsource/outfit@5.0.17/files/outfit-latin-400-normal.ttf',
-          'Outfit-Medium': 'https://cdn.jsdelivr.net/npm/@fontsource/outfit@5.0.17/files/outfit-latin-500-normal.ttf',
-          'Outfit-SemiBold': 'https://cdn.jsdelivr.net/npm/@fontsource/outfit@5.0.17/files/outfit-latin-600-normal.ttf',
-          'Outfit-Bold': 'https://cdn.jsdelivr.net/npm/@fontsource/outfit@5.0.17/files/outfit-latin-700-normal.ttf',
-          'Outfit-ExtraBold': 'https://cdn.jsdelivr.net/npm/@fontsource/outfit@5.0.17/files/outfit-latin-800-normal.ttf',
+          'Outfit-Regular': Outfit_400Regular,
+          'Outfit-Medium': Outfit_500Medium,
+          'Outfit-SemiBold': Outfit_600SemiBold,
+          'Outfit-Bold': Outfit_700Bold,
+          'Outfit-ExtraBold': Outfit_800ExtraBold,
         });
         configureGlobalFont();
         setFontsLoaded(true);
@@ -286,20 +381,27 @@ export default function RootLayout() {
     loadFonts();
   }, []);
 
+  useEffect(() => {
+    return initNotificationResponseListener();
+  }, []);
+
+  const rootNavigationState = useRootNavigationState();
+  useEffect(() => {
+    if (rootNavigationState?.key) markNavigationReady();
+  }, [rootNavigationState?.key]);
+
   return (
     <ErrorBoundary>
-      <NotificationProvider>
-        <AuthProvider>
-          <ToastProvider>
-            <StatusBar style="light" />
-            <Stack screenOptions={{ headerShown: false }}>
-              <Stack.Screen name="(auth)" />
-              <Stack.Screen name="(tabs)" />
-            </Stack>
-            {!splashDone && <SplashOverlay onDone={() => setSplashDone(true)} />}
-          </ToastProvider>
-        </AuthProvider>
-      </NotificationProvider>
+      <AuthProvider>
+        <ToastProvider>
+          <StatusBar style="light" />
+          <Stack screenOptions={{ headerShown: false }}>
+            <Stack.Screen name="(auth)" />
+            <Stack.Screen name="(tabs)" />
+          </Stack>
+          {!splashDone && <SplashOverlay onDone={() => setSplashDone(true)} />}
+        </ToastProvider>
+      </AuthProvider>
     </ErrorBoundary>
   );
 }

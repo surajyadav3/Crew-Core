@@ -6,6 +6,7 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
+import { useFocusEffect } from '@react-navigation/native';
 import { useAuth } from '@/context/AuthContext';
 import { detectIdentifierType } from '@/services/otpService';
 import { Colors as C } from '@/constants/Colors';
@@ -102,9 +103,28 @@ export default function LoginScreen() {
     }
   }, [user, profile, loading]);
 
+  // Always land on a clean, empty form — e.g. right after signing out.
+  useFocusEffect(
+    useCallback(() => {
+      if (!user) {
+        setMode('password');
+        setEmail('');
+        setPassword('');
+        setShowPass(false);
+        setIdentifier('');
+        setIdType(null);
+        setOtpStep(1);
+        setOtp('');
+        setResolvedId('');
+        setError('');
+        setSuccessMsg('');
+      }
+    }, [user])
+  );
+
   const handlePasswordLogin = useCallback(async () => {
     setError('');
-    if (!email || !password) { setError('Please enter both email and password.'); return; }
+    if (!email || !password) { setError('Please enter your email/phone and password.'); return; }
     setSubmitting(true);
     try {
       await signIn(email, password);
@@ -232,14 +252,14 @@ export default function LoginScreen() {
           {mode === 'password' && (
             <>
               <View style={s.group}>
-                <Text style={s.label}>Email Address</Text>
+                <Text style={s.label}>Email or Phone Number</Text>
                 <View style={s.inputWrap}>
                   <View style={s.inputIconWrap}>
-                    <Ionicons name="mail-outline" size={16} color={C.primary} />
+                    <Ionicons name={email.includes('@') ? 'mail-outline' : 'call-outline'} size={16} color={C.primary} />
                   </View>
                   <TextInput
                     style={s.input}
-                    placeholder="you@company.com"
+                    placeholder="you@company.com or 98765 43210"
                     placeholderTextColor={C.muted}
                     value={email}
                     onChangeText={setEmail}

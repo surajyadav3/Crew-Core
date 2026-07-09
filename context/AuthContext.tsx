@@ -1,7 +1,8 @@
 import React, { createContext, useContext, useEffect, useState, useCallback, useMemo } from 'react';
 import { supabase } from '@/lib/supabase';
-import { sendOtp as svcSendOtp, verifyOtp as svcVerifyOtp } from '@/services/otpService';
-import { useNotification } from '@/lib/notifications';
+import { sendOtp as svcSendOtp, verifyOtp as svcVerifyOtp, resolveLoginEmail } from '@/services/otpService';
+import { registerForPush } from '@/services/pushService';
+import { presentLocalNotification } from '@/lib/pushNotifications';
 
 type Profile = {
   id: string;
@@ -35,7 +36,7 @@ type AuthContextType = {
   profile: Profile | null;
   tenant: Tenant | null;
   loading: boolean;
-  signIn: (email: string, password: string) => Promise<any>;
+  signIn: (identifier: string, password: string) => Promise<any>;
   signOut: () => Promise<void>;
   refreshProfile: () => Promise<any>;
   sendOtp: (identifier: string) => Promise<any>;
@@ -125,9 +126,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return () => { mounted = false; subscription.unsubscribe(); };
   }, [fetchProfile]);
 
-  const { notify } = useNotification();
+  // Register this device for push notifications once we know who's signed in.
+  useEffect(() => {
+    if (!profile?.id || !profile?.tenant_id) return;
+    registerForPush(profile.id, profile.tenant_id).catch((err) =>
+      console.error('[CrewCore] registerForPush error:', err)
+    );
+  }, [profile?.id, profile?.tenant_id]);
 
-  // Listen for leave status changes and show in-app notification
+  // Listen for leave status changes and show a system notification
   useEffect(() => {
     if (!profile?.id) return;
 
@@ -142,28 +149,34 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           if (!newStatus || newStatus === oldStatus) return;
           const leaveType = payload.new?.leave_type || 'Leave';
           if (newStatus === 'Approved') {
-            notify('Leave Approved ✅', `Your ${leaveType} request has been approved.`, 'success');
+            presentLocalNotification('Leave Approved ✅', `Your ${leaveType} request has been approved.`, { type: 'leave_approved' });
           } else if (newStatus === 'Rejected') {
-            notify('Leave Rejected ❌', `Your ${leaveType} request was not approved.`, 'error');
+            presentLocalNotification('Leave Rejected ❌', `Your ${leaveType} request was not approved.`, { type: 'leave_rejected' });
           }
         },
       )
       .subscribe();
 
     return () => { supabase.removeChannel(channel); };
-  }, [profile?.id, notify]);
+  }, [profile?.id]);
 
-  const signIn = useCallback(async (email: string, password: string) => {
+  const signIn = useCallback(async (identifier: string, password: string) => {
+    const email = await resolveLoginEmail(identifier);
     const { data, error } = await supabase.auth.signInWithPassword({ email, password });
     if (error) throw error;
     return data;
   }, []);
 
   const signOut = useCallback(async () => {
-    await supabase.auth.signOut();
-    setUser(null);
-    setProfile(null);
-    setTenant(null);
+    try {
+      await supabase.auth.signOut();
+    } catch (err) {
+      console.error('[CrewCore] signOut error (clearing local session anyway):', err);
+    } finally {
+      setUser(null);
+      setProfile(null);
+      setTenant(null);
+    }
   }, []);
 
   const refreshProfile = useCallback(() => {
