@@ -31,7 +31,6 @@
         <category android:name="android.intent.category.DEFAULT"/>
         <category android:name="android.intent.category.BROWSABLE"/>
         <data android:scheme="crew-core"/>
-        <data android:scheme="com.crewcore.app"/>
       </intent-filter>
     </activity>
   </application>

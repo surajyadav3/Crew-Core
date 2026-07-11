@@ -6,11 +6,11 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '@/context/AuthContext';
-import { listPolicies, createPolicy } from '@/services/policyService';
+import { listPolicies, createPolicy, markPolicyRead, listPolicyReadCounts, listPolicyReads } from '@/services/policyService';
 import { listAnnouncements, createAnnouncement } from '@/services/announcementService';
 import { listMyNotifications, markNotificationRead } from '@/services/notificationService';
 import { showToast } from '@/components/Toast';
-import { fmtDate } from '@/lib/helpers';
+import { fmtDate, fmtDateTime } from '@/lib/helpers';
 import { Colors as C } from '@/constants/Colors';
 
 type Segment = 'announcements' | 'policies' | 'alerts';
@@ -28,6 +28,7 @@ const NOTIF_ICON: Record<string, keyof typeof Ionicons.glyphMap> = {
   leave_rejected: 'close-circle-outline',
   clock_in: 'log-in-outline',
   clock_out: 'log-out-outline',
+  policy_read: 'eye-outline',
 };
 
 export default function NoticesScreen() {
@@ -42,6 +43,9 @@ export default function NoticesScreen() {
   const [showModal, setShowModal] = useState(false);
   const [form, setForm] = useState({ title: '', body: '' });
   const [saving, setSaving] = useState(false);
+  const [expandedPolicyId, setExpandedPolicyId] = useState<string | null>(null);
+  const [readCounts, setReadCounts] = useState<Record<string, number>>({});
+  const [readLists, setReadLists] = useState<Record<string, any[]>>({});
 
   const fetchAll = useCallback(async () => {
     if (!tenant || !profile) return;
@@ -51,11 +55,34 @@ export default function NoticesScreen() {
       listAnnouncements(tenant.id),
       listMyNotifications(profile.id),
     ]);
-    if (polRes.error) showToast(polRes.error.message, 'error'); else setPolicies(polRes.data);
+    if (polRes.error) {
+      showToast(polRes.error.message, 'error');
+    } else {
+      setPolicies(polRes.data);
+      const ownIds = polRes.data.filter((p: any) => p.created_by === profile.id).map((p: any) => p.id);
+      if (ownIds.length > 0) {
+        const { counts } = await listPolicyReadCounts(ownIds);
+        setReadCounts(counts);
+      }
+    }
     if (annRes.error) showToast(annRes.error.message, 'error'); else setAnnouncements(annRes.data);
     if (notifRes.error) showToast(notifRes.error.message, 'error'); else setNotifications(notifRes.data);
     setLoading(false);
   }, [tenant, profile]);
+
+  const handleOpenPolicy = async (item: any) => {
+    if (!profile || !tenant) return;
+    if (item.created_by === profile.id) {
+      const next = expandedPolicyId === item.id ? null : item.id;
+      setExpandedPolicyId(next);
+      if (next && !readLists[item.id]) {
+        const { data } = await listPolicyReads(item.id);
+        setReadLists((prev) => ({ ...prev, [item.id]: data }));
+      }
+      return;
+    }
+    markPolicyRead(item.id, profile.id, tenant.id);
+  };
 
   useEffect(() => { fetchAll(); }, [fetchAll]);
 
@@ -152,18 +179,50 @@ export default function NoticesScreen() {
           </View>
         ) : (
           <View style={s.list}>
-            {list.map((item) => (
-              <View key={item.id} style={s.noticeCard}>
-                <View style={s.noticeTop}>
-                  <View style={s.noticeIconWrap}>
-                    <Ionicons name={segment === 'policies' ? 'document-text' : 'megaphone'} size={16} color={C.primary} />
+            {list.map((item) => {
+              const isOwnPolicy = segment === 'policies' && item.created_by === profile?.id;
+              const viewers = (readLists[item.id] || []).filter((r: any) => r.profile_id !== profile?.id);
+              return (
+                <TouchableOpacity
+                  key={item.id}
+                  style={s.noticeCard}
+                  activeOpacity={segment === 'policies' ? 0.85 : 1}
+                  disabled={segment !== 'policies'}
+                  onPress={() => handleOpenPolicy(item)}
+                >
+                  <View style={s.noticeTop}>
+                    <View style={s.noticeIconWrap}>
+                      <Ionicons name={segment === 'policies' ? 'document-text' : 'megaphone'} size={16} color={C.primary} />
+                    </View>
+                    <Text style={s.noticeTitle} numberOfLines={2}>{item.title}</Text>
                   </View>
-                  <Text style={s.noticeTitle} numberOfLines={2}>{item.title}</Text>
-                </View>
-                <Text style={s.noticeBody}>{item.body ?? item.message}</Text>
-                <Text style={s.noticeTime}>Posted {fmtDate(item.created_at)}</Text>
-              </View>
-            ))}
+                  <Text style={s.noticeBody}>{item.body ?? item.message}</Text>
+                  <Text style={s.noticeTime}>Posted {fmtDate(item.created_at)}</Text>
+                  {isOwnPolicy && (
+                    <View style={s.seenByRow}>
+                      <Ionicons name="eye-outline" size={13} color={C.muted} />
+                      <Text style={s.seenByText}>Seen by {readCounts[item.id] ?? 0}</Text>
+                    </View>
+                  )}
+                  {isOwnPolicy && expandedPolicyId === item.id && (
+                    <View style={s.seenByList}>
+                      {!readLists[item.id] ? (
+                        <ActivityIndicator color={C.primary} size="small" />
+                      ) : viewers.length === 0 ? (
+                        <Text style={s.seenByEmpty}>No one has opened this yet.</Text>
+                      ) : (
+                        viewers.map((r: any) => (
+                          <View key={r.profile_id} style={s.seenByItem}>
+                            <Text style={s.seenByName}>{r.profile?.first_name} {r.profile?.last_name}</Text>
+                            <Text style={s.seenByTime}>{fmtDateTime(r.read_at)}</Text>
+                          </View>
+                        ))
+                      )}
+                    </View>
+                  )}
+                </TouchableOpacity>
+              );
+            })}
           </View>
         )}
       </ScrollView>
@@ -276,6 +335,15 @@ const s = StyleSheet.create({
   noticeTitle: { flex: 1, fontSize: 15, fontWeight: '700', color: C.text },
   noticeBody: { fontSize: 13, color: C.muted, lineHeight: 19 },
   noticeTime: { fontSize: 11, color: '#CBD5E1' },
+  seenByRow: { flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: 4 },
+  seenByText: { fontSize: 11.5, color: C.muted, fontWeight: '600' },
+  seenByList: {
+    marginTop: 8, paddingTop: 10, borderTopWidth: 1, borderTopColor: C.border, gap: 8,
+  },
+  seenByEmpty: { fontSize: 12, color: C.muted, fontStyle: 'italic' },
+  seenByItem: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  seenByName: { fontSize: 12.5, color: C.text, fontWeight: '600' },
+  seenByTime: { fontSize: 11, color: C.muted },
   notifCard: {
     flexDirection: 'row', alignItems: 'flex-start', gap: 12,
     backgroundColor: C.surface, borderRadius: 16, padding: 14,

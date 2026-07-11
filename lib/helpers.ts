@@ -21,6 +21,17 @@ export const fmtDate = (d: string | null) => {
   }
 };
 
+export const fmtDateTime = (d: string | null) => {
+  if (!d) return '—';
+  try {
+    return new Date(d).toLocaleString('en-IN', {
+      day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true,
+    });
+  } catch {
+    return fmtDate(d);
+  }
+};
+
 export const monthLabel = (m: number, y: number) => {
   try {
     return new Date(y, m).toLocaleDateString('en-IN', { month: 'long', year: 'numeric' });

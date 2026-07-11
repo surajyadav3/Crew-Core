@@ -12,6 +12,7 @@ hs_err_pid*.log
 replay_pid*.log
 eas_*.txt
 supabase/.temp/
+android/.kotlin/
 
 # Play Store service account key (contains secrets)
 google-play-key.json

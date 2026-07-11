@@ -213,6 +213,17 @@ CREATE TABLE IF NOT EXISTS policies (
 );
 CREATE INDEX IF NOT EXISTS idx_policies_tenant ON policies(tenant_id, created_at DESC);
 
+CREATE TABLE IF NOT EXISTS policy_reads (
+  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  policy_id   uuid NOT NULL REFERENCES policies(id)  ON DELETE CASCADE,
+  profile_id  uuid NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+  tenant_id   uuid NOT NULL REFERENCES tenants(id)  ON DELETE CASCADE,
+  read_at     timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (policy_id, profile_id)
+);
+CREATE INDEX IF NOT EXISTS idx_policy_reads_policy  ON policy_reads(policy_id);
+CREATE INDEX IF NOT EXISTS idx_policy_reads_profile ON policy_reads(profile_id);
+
 -- NOTE: pre-existing table from the crewcore.in web app — kept here only so a fresh
 -- install ends up with the same shape. Uses `message` (not `body`) and a `department`
 -- column for department-scoped delivery (default 'All' = everyone).
@@ -276,6 +287,7 @@ ALTER TABLE leave_requests        ENABLE ROW LEVEL SECURITY;
 ALTER TABLE attendance_audit_log  ENABLE ROW LEVEL SECURITY;
 ALTER TABLE push_tokens            ENABLE ROW LEVEL SECURITY;
 ALTER TABLE policies                ENABLE ROW LEVEL SECURITY;
+ALTER TABLE policy_reads             ENABLE ROW LEVEL SECURITY;
 ALTER TABLE announcements            ENABLE ROW LEVEL SECURITY;
 ALTER TABLE notifications             ENABLE ROW LEVEL SECURITY;
 
@@ -526,6 +538,21 @@ CREATE POLICY "policies: admin/superadmin can write"
   USING (tenant_id = my_tenant_id() AND my_role() IN ('admin','superadmin'))
   WITH CHECK (tenant_id = my_tenant_id() AND my_role() IN ('admin','superadmin'));
 
+-- ---- policy_reads ----
+DROP POLICY IF EXISTS "policy_reads: user inserts own" ON policy_reads;
+DROP POLICY IF EXISTS "policy_reads: creator/admin can read" ON policy_reads;
+
+CREATE POLICY "policy_reads: user inserts own"
+  ON policy_reads FOR INSERT
+  WITH CHECK (profile_id = auth.uid() AND tenant_id = my_tenant_id());
+
+CREATE POLICY "policy_reads: creator/admin can read"
+  ON policy_reads FOR SELECT
+  USING (
+    tenant_id = my_tenant_id()
+    AND (profile_id = auth.uid() OR my_role() IN ('admin','superadmin'))
+  );
+
 -- ---- announcements ----
 DROP POLICY IF EXISTS "announcements: tenant members can read" ON announcements;
 DROP POLICY IF EXISTS "announcements: admin/superadmin can write" ON announcements;
@@ -774,6 +801,32 @@ $$;
 DROP TRIGGER IF EXISTS on_policy_created ON policies;
 CREATE TRIGGER on_policy_created AFTER INSERT ON policies
   FOR EACH ROW EXECUTE FUNCTION trg_notify_policy_created();
+
+-- Fires once per (policy, viewer) — policy_reads has a UNIQUE(policy_id, profile_id)
+-- and the client upserts with ON CONFLICT DO NOTHING, so repeat opens never re-insert
+-- and never re-notify. Skips notifying the creator about their own view.
+CREATE OR REPLACE FUNCTION trg_notify_policy_read()
+RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  v_created_by uuid;
+  v_title      text;
+  v_viewer     text;
+BEGIN
+  SELECT created_by, title INTO v_created_by, v_title FROM policies WHERE id = NEW.policy_id;
+  IF v_created_by IS NULL OR v_created_by = NEW.profile_id THEN
+    RETURN NEW;
+  END IF;
+  SELECT trim(first_name || ' ' || last_name) INTO v_viewer FROM profiles WHERE id = NEW.profile_id;
+  PERFORM notify_via_edge_function(jsonb_build_object(
+    'tenant_id', NEW.tenant_id, 'target', 'user:' || v_created_by, 'type', 'policy_read',
+    'title', 'Policy viewed', 'body', coalesce(v_viewer, 'Someone') || ' viewed "' || v_title || '"'
+  ));
+  RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS on_policy_read ON policy_reads;
+CREATE TRIGGER on_policy_read AFTER INSERT ON policy_reads
+  FOR EACH ROW EXECUTE FUNCTION trg_notify_policy_read();
 
 -- NOTE: the `announcements` table pre-existed (from the crewcore.in web app) with a
 -- `message` column (not `body`) and a `department` column (default 'All'). This trigger
