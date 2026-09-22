@@ -1,6 +1,6 @@
 import 'react-native-url-polyfill/auto';
 import React, { useEffect, useRef, useState } from 'react';
-import { View, Text, TextInput, TouchableOpacity, Alert, Animated, StyleSheet, Dimensions, Easing } from 'react-native';
+import { View, Text, TextInput, TouchableOpacity, Alert, Animated, StyleSheet, Easing, Image, Dimensions } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Font from 'expo-font';
 import {
@@ -14,208 +14,81 @@ import { Stack, useRootNavigationState } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { Ionicons } from '@expo/vector-icons';
 import * as SplashScreen from 'expo-splash-screen';
+import { Colors } from '@/constants/Colors';
 import { AuthProvider } from '@/context/AuthContext';
+import { FeatureProvider } from '@/context/FeatureContext';
 import { ToastProvider } from '@/components/Toast';
+import ForcePasswordChange from '@/components/ForcePasswordChange';
+import LocationConsentGate from '@/components/LocationConsentGate';
 import { initNotificationResponseListener, markNavigationReady } from '@/lib/pushNotifications';
 
 SplashScreen.preventAutoHideAsync().catch(() => {});
 
-const { width: W, height: H } = Dimensions.get('window');
-
 const BG      = '#080D1A';
 const PRIMARY = '#6C5CE7';
-const ACCENT  = '#A78BFA';
-
-// ── Ambient orb (large blurry colour blob) ─────────────────────────────────────
-function Orb({ cx, cy, size, color, delay }: { cx: number; cy: number; size: number; color: string; delay: number }) {
-  const opacity = useRef(new Animated.Value(0)).current;
-  const scale   = useRef(new Animated.Value(0.85)).current;
-  useEffect(() => {
-    Animated.sequence([
-      Animated.delay(delay),
-      Animated.parallel([
-        Animated.timing(opacity, { toValue: 1, duration: 1000, useNativeDriver: true }),
-        Animated.timing(scale,   { toValue: 1,  duration: 1200, easing: Easing.out(Easing.ease), useNativeDriver: true }),
-      ]),
-    ]).start(() => {
-      Animated.loop(
-        Animated.sequence([
-          Animated.timing(scale, { toValue: 1.06, duration: 3000, easing: Easing.inOut(Easing.ease), useNativeDriver: true }),
-          Animated.timing(scale, { toValue: 1.00, duration: 3000, easing: Easing.inOut(Easing.ease), useNativeDriver: true }),
-        ])
-      ).start();
-    });
-  }, []);
-  return (
-    <Animated.View style={{
-      position: 'absolute',
-      left: cx - size / 2, top: cy - size / 2,
-      width: size, height: size, borderRadius: size / 2,
-      backgroundColor: color,
-      opacity, transform: [{ scale }],
-    }} />
-  );
-}
-
-// ── Pulse ring that expands outward ────────────────────────────────────────────
-function PulseRing({ delay, size }: { delay: number; size: number }) {
-  const scale   = useRef(new Animated.Value(0.5)).current;
-  const opacity = useRef(new Animated.Value(0)).current;
-  useEffect(() => {
-    const run = () =>
-      Animated.sequence([
-        Animated.delay(delay),
-        Animated.parallel([
-          Animated.timing(scale,   { toValue: 1, duration: 1800, easing: Easing.out(Easing.ease), useNativeDriver: true }),
-          Animated.sequence([
-            Animated.timing(opacity, { toValue: 0.45, duration: 250, useNativeDriver: true }),
-            Animated.timing(opacity, { toValue: 0,    duration: 1550, useNativeDriver: true }),
-          ]),
-        ]),
-        Animated.parallel([
-          Animated.timing(scale,   { toValue: 0.5, duration: 0, useNativeDriver: true }),
-        ]),
-      ]);
-    Animated.loop(run()).start();
-  }, []);
-  return (
-    <Animated.View style={{
-      position: 'absolute',
-      width: size, height: size, borderRadius: size / 2,
-      borderWidth: 1, borderColor: ACCENT,
-      opacity, transform: [{ scale }],
-    }} />
-  );
-}
 
 // ── Splash overlay ─────────────────────────────────────────────────────────────
-const APP_NAME = 'CrewCore';
+// Plain white background, the logo centered, and the wordmark typed out
+// slowly underneath. Nothing else — no rings, no orbs, no shine.
+const WORDMARK = 'Crew Core';
+const SUBMARK  = 'HRMS';
+
+const { height: SCREEN_H } = Dimensions.get('window');
 
 function SplashOverlay({ onDone }: { onDone: () => void }) {
-  const logoScale   = useRef(new Animated.Value(0)).current;
   const logoOpacity = useRef(new Animated.Value(0)).current;
-  const shineX      = useRef(new Animated.Value(-120)).current;
-  const tagOpacity  = useRef(new Animated.Value(0)).current;
-  const tagY        = useRef(new Animated.Value(10)).current;
-  const progressW   = useRef(new Animated.Value(0)).current;
+  // Starts well above the top of the screen so it visibly falls all the way
+  // down to its resting place at center, rather than just nudging in.
+  const logoDrop    = useRef(new Animated.Value(-(SCREEN_H / 2 + 160))).current;
+  const typeProgress = useRef(new Animated.Value(0)).current;
+  const subOpacity  = useRef(new Animated.Value(0)).current;
   const exitOpacity = useRef(new Animated.Value(1)).current;
-  const exitScale   = useRef(new Animated.Value(1)).current;
-
-  // One animated value per character
-  const charValues = useRef(
-    APP_NAME.split('').map(() => ({
-      opacity: new Animated.Value(0),
-      y:       new Animated.Value(18),
-    }))
-  ).current;
+  const [typedText, setTypedText] = useState('');
 
   useEffect(() => {
     SplashScreen.hideAsync().catch(() => {});
 
-    // Phase 1 — Logo springs in (0 ms)
-    Animated.parallel([
-      Animated.spring(logoScale,   { toValue: 1, useNativeDriver: true, damping: 9, stiffness: 200, mass: 0.7 }),
-      Animated.timing(logoOpacity, { toValue: 1, duration: 220, useNativeDriver: true }),
-    ]).start();
+    // react-native-web's native driver can't animate non-transform/opacity
+    // values, and the typewriter progress below drives plain text — keep
+    // everything on the JS driver so it works the same on every platform.
+    const native = false;
 
-    // Phase 2 — Shine sweeps across logo plate (300 ms)
-    Animated.sequence([
-      Animated.delay(300),
-      Animated.timing(shineX, { toValue: 120, duration: 380, easing: Easing.out(Easing.ease), useNativeDriver: true }),
-    ]).start();
-
-    // Phase 3 — Characters stagger in (420 ms base, 55 ms apart)
-    APP_NAME.split('').forEach((_, i) => {
-      Animated.sequence([
-        Animated.delay(420 + i * 55),
-        Animated.parallel([
-          Animated.spring(charValues[i].y, { toValue: 0, useNativeDriver: true, damping: 11, stiffness: 220 }),
-          Animated.timing(charValues[i].opacity, { toValue: 1, duration: 200, useNativeDriver: true }),
-        ]),
-      ]).start();
+    const id = typeProgress.addListener(({ value }) => {
+      setTypedText(WORDMARK.slice(0, Math.round(value)));
     });
 
-    // Phase 4 — Tagline slides up (900 ms)
     Animated.sequence([
-      Animated.delay(900),
+      // Phase 1 — Logo falls from the top and eases into a soft, single
+      // overshoot-settle at center (a smooth cubic curve reads far less
+      // mechanical here than the hard-cornered Easing.bounce did).
       Animated.parallel([
-        Animated.spring(tagY,      { toValue: 0, useNativeDriver: true, damping: 13, stiffness: 180 }),
-        Animated.timing(tagOpacity,{ toValue: 1, duration: 320, useNativeDriver: true }),
+        Animated.timing(logoOpacity, { toValue: 1, duration: 220, useNativeDriver: native }),
+        Animated.timing(logoDrop,    { toValue: 0, duration: 950, easing: Easing.out(Easing.back(1.3)), useNativeDriver: native }),
       ]),
-    ]).start();
-
-    // Phase 5 — Progress line draws (1050 ms → 1750 ms)
-    Animated.sequence([
-      Animated.delay(1050),
-      Animated.timing(progressW, { toValue: 1, duration: 700, easing: Easing.inOut(Easing.ease), useNativeDriver: false }),
-    ]).start();
-
-    // Phase 6 — Exit: scale up + fade out (2050 ms)
-    Animated.sequence([
-      Animated.delay(2050),
-      Animated.parallel([
-        Animated.timing(exitOpacity, { toValue: 0, duration: 420, easing: Easing.in(Easing.ease), useNativeDriver: true }),
-        Animated.timing(exitScale,   { toValue: 1.07, duration: 420, easing: Easing.in(Easing.ease), useNativeDriver: true }),
-      ]),
+      // Phase 2 — "Crew Core" types out slowly, letter by letter
+      Animated.timing(typeProgress, {
+        toValue: WORDMARK.length,
+        duration: 1500,
+        easing: Easing.linear,
+        useNativeDriver: native,
+      }),
+      // Phase 3 — "HRMS" fades in underneath
+      Animated.timing(subOpacity, { toValue: 1, duration: 300, useNativeDriver: native }),
+      // Brief pause to let it be read, then exit
+      Animated.delay(400),
+      Animated.timing(exitOpacity, { toValue: 0, duration: 300, easing: Easing.in(Easing.ease), useNativeDriver: native }),
     ]).start(onDone);
+
+    return () => typeProgress.removeListener(id);
   }, []);
 
-  const progressBarWidth = progressW.interpolate({ inputRange: [0, 1], outputRange: ['0%', '100%'] });
-
   return (
-    <Animated.View
-      style={[sp.overlay, { opacity: exitOpacity, transform: [{ scale: exitScale }] }]}
-      pointerEvents="none"
-    >
-      {/* Ambient orbs */}
-      <Orb cx={W * 0.15} cy={H * 0.22} size={300} color="rgba(37,99,235,0.14)" delay={0} />
-      <Orb cx={W * 0.88} cy={H * 0.72} size={260} color="rgba(99,102,241,0.10)" delay={200} />
-      <Orb cx={W * 0.5}  cy={H * 0.9}  size={200} color="rgba(59,130,246,0.09)" delay={400} />
-
-      {/* Pulse rings behind logo */}
-      <PulseRing delay={0}    size={180} />
-      <PulseRing delay={700}  size={260} />
-      <PulseRing delay={1400} size={340} />
-
-      {/* ── Logo ─────────────────────────────────────────── */}
-      <Animated.View style={{ opacity: logoOpacity, transform: [{ scale: logoScale }], alignItems: 'center' }}>
-        <View style={sp.logoBox}>
-          <Ionicons name="briefcase" size={40} color="#fff" />
-          {/* Shine sweep */}
-          <Animated.View
-            style={[sp.shine, { transform: [{ translateX: shineX }, { rotate: '20deg' }] }]}
-          />
-        </View>
+    <Animated.View style={[sp.overlay, { opacity: exitOpacity }]} pointerEvents="none">
+      <Animated.View style={{ opacity: logoOpacity, transform: [{ translateY: logoDrop }], alignItems: 'center' }}>
+        <Image source={require('@/assets/icon.png')} style={sp.logo} resizeMode="contain" />
       </Animated.View>
-
-      {/* ── App name (per-character) ──────────────────────── */}
-      <View style={sp.nameRow}>
-        {APP_NAME.split('').map((char, i) => (
-          <Animated.Text
-            key={i}
-            style={[
-              sp.nameChar,
-              i < 4 ? sp.nameWhite : sp.nameBlue,
-              { opacity: charValues[i].opacity, transform: [{ translateY: charValues[i].y }] },
-            ]}
-          >
-            {char}
-          </Animated.Text>
-        ))}
-      </View>
-
-      {/* ── Tagline ───────────────────────────────────────── */}
-      <Animated.Text style={[sp.tagline, { opacity: tagOpacity, transform: [{ translateY: tagY }] }]}>
-        Smart Payroll · Modern Teams
-      </Animated.Text>
-
-      {/* ── Progress line ─────────────────────────────────── */}
-      <View style={sp.progressTrack}>
-        <Animated.View style={[sp.progressFill, { width: progressBarWidth }]} />
-      </View>
-
-      {/* ── Version ───────────────────────────────────────── */}
-      <Animated.Text style={[sp.version, { opacity: tagOpacity }]}>v1.1.0</Animated.Text>
+      <Text style={sp.wordmark}>{typedText}</Text>
+      <Animated.Text style={[sp.subtext, { opacity: subOpacity }]}>{SUBMARK}</Animated.Text>
     </Animated.View>
   );
 }
@@ -223,54 +96,21 @@ function SplashOverlay({ onDone }: { onDone: () => void }) {
 const sp = StyleSheet.create({
   overlay: {
     ...StyleSheet.absoluteFillObject,
-    backgroundColor: BG,
+    backgroundColor: Colors.bg,
     alignItems: 'center', justifyContent: 'center',
     zIndex: 999, elevation: 999,
   },
-  logoBox: {
-    width: 92, height: 92, borderRadius: 28,
-    backgroundColor: PRIMARY,
-    alignItems: 'center', justifyContent: 'center',
-    shadowColor: PRIMARY, shadowOpacity: 0.8, shadowRadius: 36, elevation: 24,
-    borderWidth: 1, borderColor: 'rgba(255,255,255,0.18)',
-    marginBottom: 34,
-    overflow: 'hidden',
+  logo: {
+    width: 96, height: 96, borderRadius: 24,
+    marginBottom: 22,
   },
-  shine: {
-    position: 'absolute',
-    top: 0, bottom: 0,
-    width: 40,
-    backgroundColor: 'rgba(255,255,255,0.28)',
+  wordmark: {
+    fontSize: 30, fontWeight: '800', letterSpacing: 0.2,
+    color: Colors.primary, height: 38,
   },
-  nameRow: {
-    flexDirection: 'row',
-    alignItems: 'flex-end',
-    marginBottom: 12,
-  },
-  nameChar: {
-    fontSize: 44, fontWeight: '900', letterSpacing: -1,
-  },
-  nameWhite: { color: '#F0F6FF' },
-  nameBlue:  { color: ACCENT },
-  tagline: {
-    fontSize: 11, fontWeight: '500',
-    color: 'rgba(148,163,184,0.7)', letterSpacing: 2.2,
-    textTransform: 'uppercase', marginBottom: 52,
-  },
-  progressTrack: {
-    position: 'absolute', bottom: H * 0.1,
-    width: 120, height: 2, borderRadius: 1,
-    backgroundColor: 'rgba(255,255,255,0.07)',
-    overflow: 'hidden',
-  },
-  progressFill: {
-    height: '100%', borderRadius: 1,
-    backgroundColor: ACCENT,
-    shadowColor: ACCENT, shadowOpacity: 1, shadowRadius: 4,
-  },
-  version: {
-    position: 'absolute', bottom: H * 0.1 - 22,
-    fontSize: 10, color: 'rgba(148,163,184,0.35)', letterSpacing: 1,
+  subtext: {
+    fontSize: 13, fontWeight: '600', letterSpacing: 2,
+    color: Colors.primary, marginTop: 2, textTransform: 'uppercase',
   },
 });
 
@@ -283,9 +123,12 @@ class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { has
   static getDerivedStateFromError(error: Error) {
     return { hasError: true, error: error?.message ?? 'Unknown error' };
   }
-  componentDidCatch(error: Error) {
-    console.error('[CrewCore]', error);
-    AsyncStorage.setItem('__crewcore_crash', `${error?.message ?? 'unknown'}\n${(error?.stack ?? '').slice(0, 600)}`).catch(() => {});
+  componentDidCatch(error: Error, info: React.ErrorInfo) {
+    // Full message + stack goes to the console/crash log for debugging; only a
+    // generic notice is ever persisted for the user-facing "previous crash" alert
+    // below, so we don't surface internal stack traces / file paths to end users.
+    console.error('[CrewCore]', error, info?.componentStack);
+    AsyncStorage.setItem('__crewcore_crash', new Date().toLocaleString()).catch(() => {});
   }
   render() {
     if (this.state.hasError) return (
@@ -355,9 +198,11 @@ export default function RootLayout() {
   useEffect(() => {
     AsyncStorage.getItem('__crewcore_crash').then((msg) => {
       if (!msg) return;
-      Alert.alert('Previous Session Crash', msg, [
-        { text: 'Clear & Continue', onPress: () => AsyncStorage.removeItem('__crewcore_crash') },
-      ]);
+      Alert.alert(
+        'App Restarted After a Crash',
+        `CrewCore ran into a problem and had to restart (${msg}). Your data is safe — if this keeps happening, please contact support.`,
+        [{ text: 'OK', onPress: () => AsyncStorage.removeItem('__crewcore_crash') }],
+      );
     }).catch(() => {});
   }, []);
 
@@ -393,14 +238,18 @@ export default function RootLayout() {
   return (
     <ErrorBoundary>
       <AuthProvider>
-        <ToastProvider>
-          <StatusBar style="light" />
-          <Stack screenOptions={{ headerShown: false }}>
-            <Stack.Screen name="(auth)" />
-            <Stack.Screen name="(tabs)" />
-          </Stack>
-          {!splashDone && <SplashOverlay onDone={() => setSplashDone(true)} />}
-        </ToastProvider>
+        <FeatureProvider>
+          <ToastProvider>
+            <StatusBar style="light" />
+            <Stack screenOptions={{ headerShown: false }}>
+              <Stack.Screen name="(auth)" />
+              <Stack.Screen name="(tabs)" />
+            </Stack>
+            <ForcePasswordChange />
+            <LocationConsentGate />
+            {!splashDone && <SplashOverlay onDone={() => setSplashDone(true)} />}
+          </ToastProvider>
+        </FeatureProvider>
       </AuthProvider>
     </ErrorBoundary>
   );
