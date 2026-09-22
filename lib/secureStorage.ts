@@ -12,13 +12,39 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 // SecureStore (hardware-backed Keystore / Keychain). See:
 // https://supabase.com/docs/guides/auth/quickstarts/react-native
 class LargeSecureStore {
+  // getItem and setItem can both call getKey() for the same key name at
+  // nearly the same instant (e.g. a TOKEN_REFRESHED write landing while a
+  // concurrent getSession() read is still in flight, most likely right after
+  // a fresh install/first login when no key exists yet). Without this lock,
+  // both calls would independently see "no existing key," each generate and
+  // persist a DIFFERENT random key, and whichever wrote last silently wins —
+  // leaving the other operation's encrypt/decrypt using an orphaned key. The
+  // next read then fails to decrypt with the surviving key and falls into
+  // the catch block below, which *wipes the whole stored session* — a
+  // same-day, no-warning "logged out" with a perfectly valid refresh token
+  // underneath it. Serializing per key name so every caller awaits the same
+  // in-flight creation (and reads the one persisted key afterwards) removes
+  // the race entirely.
+  private keyPromises = new Map<string, Promise<Uint8Array>>();
+
   private async getKey(name: string): Promise<Uint8Array> {
     const keyName = `${name}_key`;
-    const existing = await SecureStore.getItemAsync(keyName);
-    if (existing) return aesjs.utils.hex.toBytes(existing);
-    const fresh = aesjs.utils.hex.fromBytes(crypto.getRandomValues(new Uint8Array(32)));
-    await SecureStore.setItemAsync(keyName, fresh);
-    return aesjs.utils.hex.toBytes(fresh);
+    const inFlight = this.keyPromises.get(keyName);
+    if (inFlight) return inFlight;
+
+    const promise = (async () => {
+      try {
+        const existing = await SecureStore.getItemAsync(keyName);
+        if (existing) return aesjs.utils.hex.toBytes(existing);
+        const fresh = aesjs.utils.hex.fromBytes(crypto.getRandomValues(new Uint8Array(32)));
+        await SecureStore.setItemAsync(keyName, fresh);
+        return aesjs.utils.hex.toBytes(fresh);
+      } finally {
+        this.keyPromises.delete(keyName);
+      }
+    })();
+    this.keyPromises.set(keyName, promise);
+    return promise;
   }
 
   async getItem(key: string): Promise<string | null> {
