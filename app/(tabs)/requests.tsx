@@ -1,11 +1,13 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity, Modal,
-  TextInput, ActivityIndicator, Alert, KeyboardAvoidingView, Platform, Animated, Easing,
+  TextInput, ActivityIndicator, Alert, KeyboardAvoidingView, Platform, Animated, Easing, RefreshControl,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '@/context/AuthContext';
+import { useFeatures } from '@/context/FeatureContext';
+import { useForegroundRefresh } from '@/hooks/useForegroundRefresh';
 import { listMySpecialRequests, submitSpecialRequest } from '@/services/specialRequestService';
 import { submitRegularizeRequest, listMyRegularizeRequests } from '@/services/attendanceService';
 import { fetchMyQuota } from '@/services/requestQuotaService';
@@ -15,6 +17,9 @@ import {
   HIGH_SALARY_THRESHOLD, calcPayableOvertimeHours, calcOtPay,
 } from '@/lib/helpers';
 import { Colors as C } from '@/constants/Colors';
+
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 
 type Quota = { selfUsed: number; selfLimit: number; managerUsed: number; managerLimit: number };
 
@@ -82,7 +87,7 @@ const EMPTY_SPECIAL = {
   ot_minutes: 45,
 };
 
-function SpecialTab({ onOpenModal }: { onOpenModal: (open: () => void) => void }) {
+function SpecialTab({ onOpenModal, onRefresh }: { onOpenModal: (open: () => void) => void; onRefresh: (fn: () => Promise<void>) => void }) {
   const { profile, tenant } = useAuth();
   const isOtEligible = (profile?.ctc || 0) > 0 && (profile?.ctc || 0) < HIGH_SALARY_THRESHOLD;
   const [requests, setRequests] = useState<any[]>([]);
@@ -96,17 +101,18 @@ function SpecialTab({ onOpenModal }: { onOpenModal: (open: () => void) => void }
 
   const fetchData = useCallback(async () => {
     if (!profile) return;
-    setLoading(true);
     const [reqRes, quotaRes] = await Promise.all([
       listMySpecialRequests(profile.id),
       tenant ? fetchMyQuota(tenant.id, profile.id) : null,
     ]);
-    setRequests(reqRes.data);
+    if (reqRes.error) showToast(reqRes.error.message || 'Could not load requests.', 'error');
+    else setRequests(reqRes.data);
     if (quotaRes) setQuota(quotaRes);
-    setLoading(false);
   }, [profile, tenant]);
 
-  useEffect(() => { fetchData(); }, [fetchData]);
+  useForegroundRefresh(fetchData, setLoading);
+
+  useEffect(() => { onRefresh(fetchData); }, [fetchData]);
 
   const openModal = () => { setForm({ ...EMPTY_SPECIAL }); setShowModal(true); };
   useEffect(() => { onOpenModal(openModal); }, []);
@@ -114,6 +120,9 @@ function SpecialTab({ onOpenModal }: { onOpenModal: (open: () => void) => void }
   const handleSubmit = async () => {
     if (!form.reason.trim()) { showToast('Please provide a reason.', 'error'); return; }
     if (!tenant) { showToast('You do not belong to any workspace.', 'error'); return; }
+    if (!DATE_RE.test(form.request_date) || isNaN(new Date(form.request_date).getTime())) {
+      showToast('Please enter a valid date (YYYY-MM-DD).', 'error'); return;
+    }
     if (form.request_type === 'Salary Overtime') {
       const totalMin = (form.ot_hours || 0) * 60 + (form.ot_minutes || 0);
       const payable = calcPayableOvertimeHours(totalMin);
@@ -208,7 +217,7 @@ function SpecialTab({ onOpenModal }: { onOpenModal: (open: () => void) => void }
         </View>
       )}
 
-      <Modal visible={showModal} animationType="slide" transparent>
+      <Modal visible={showModal && !showTypePicker && !showLateHoursPicker} animationType="slide" transparent>
         <KeyboardAvoidingView style={s.modalOverlay} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
           <View style={s.modalCard}>
             <View style={s.modalHandle} />
@@ -328,7 +337,7 @@ function SpecialTab({ onOpenModal }: { onOpenModal: (open: () => void) => void }
 
 const EMPTY_REG = { date: todayStr(), clockInTime: '', clockOutTime: '', reason: '' };
 
-function RegularizeTab({ onOpenModal }: { onOpenModal: (open: () => void) => void }) {
+function RegularizeTab({ onOpenModal, onRefresh }: { onOpenModal: (open: () => void) => void; onRefresh: (fn: () => Promise<void>) => void }) {
   const { profile, tenant } = useAuth();
   const tenantRef = useRef(tenant);
   tenantRef.current = tenant;
@@ -341,17 +350,18 @@ function RegularizeTab({ onOpenModal }: { onOpenModal: (open: () => void) => voi
 
   const fetchData = useCallback(async () => {
     if (!profile) return;
-    setLoading(true);
     const [reqRes, quotaRes] = await Promise.all([
       listMyRegularizeRequests(profile.id),
       tenant ? fetchMyQuota(tenant.id, profile.id) : null,
     ]);
-    setRequests(reqRes.data);
+    if (reqRes.error) showToast(reqRes.error.message || 'Could not load requests.', 'error');
+    else setRequests(reqRes.data);
     if (quotaRes) setQuota(quotaRes);
-    setLoading(false);
   }, [profile, tenant]);
 
-  useEffect(() => { fetchData(); }, [fetchData]);
+  useForegroundRefresh(fetchData, setLoading);
+
+  useEffect(() => { onRefresh(fetchData); }, [fetchData]);
 
   const openModal = useCallback(() => {
     const t = tenantRef.current;
@@ -362,9 +372,12 @@ function RegularizeTab({ onOpenModal }: { onOpenModal: (open: () => void) => voi
 
   const handleSubmit = async () => {
     if (!form.date) { showToast('Please select a date.', 'error'); return; }
+    if (!DATE_RE.test(form.date) || isNaN(new Date(form.date).getTime())) {
+      showToast('Please enter a valid date (YYYY-MM-DD).', 'error'); return;
+    }
     if (form.date > todayStr()) { showToast('Cannot regularize a future date.', 'error'); return; }
-    if (!form.clockInTime) { showToast('Clock-in time is required.', 'error'); return; }
-    if (!form.clockOutTime) { showToast('Clock-out time is required.', 'error'); return; }
+    if (!TIME_RE.test(form.clockInTime)) { showToast('Clock-in time must be in HH:MM (24h) format.', 'error'); return; }
+    if (!TIME_RE.test(form.clockOutTime)) { showToast('Clock-out time must be in HH:MM (24h) format.', 'error'); return; }
     if (form.clockInTime >= form.clockOutTime) { showToast('Clock-out must be after clock-in.', 'error'); return; }
     if (!form.reason.trim()) { showToast('Reason is required.', 'error'); return; }
     if (!tenant) { showToast('You do not belong to any workspace.', 'error'); return; }
@@ -531,14 +544,31 @@ function PickerModal({ visible, title, options, selected, onSelect, onClose, col
 type TabKey = 'special' | 'regularize';
 
 export default function RequestsScreen() {
+  const { isEnabled } = useFeatures();
+  const availableTabs = (['special', 'regularize'] as const).filter(
+    (key) => isEnabled(key === 'special' ? 'special_requests' : 'regularize_attendance')
+  );
   const [activeTab, setActiveTab] = useState<TabKey>('special');
+  const [refreshing, setRefreshing] = useState(false);
+
+  useEffect(() => {
+    if (!availableTabs.includes(activeTab) && availableTabs.length) setActiveTab(availableTabs[0]);
+  }, [availableTabs.join(',')]);
   const openSpecialRef = React.useRef<() => void>(() => {});
   const openRegRef = React.useRef<() => void>(() => {});
+  const refreshSpecialRef = React.useRef<() => Promise<void>>(async () => {});
+  const refreshRegRef = React.useRef<() => Promise<void>>(async () => {});
   const tabAnim = useRef(new Animated.Value(0)).current;
 
   const openNew = () => {
     if (activeTab === 'special') openSpecialRef.current();
     else openRegRef.current();
+  };
+
+  const handleRefresh = async () => {
+    setRefreshing(true);
+    await (activeTab === 'special' ? refreshSpecialRef.current() : refreshRegRef.current());
+    setRefreshing(false);
   };
 
   const switchTab = (key: TabKey) => {
@@ -565,8 +595,9 @@ export default function RequestsScreen() {
       </View>
 
       {/* Tab switcher */}
+      {availableTabs.length > 1 && (
       <View style={s.tabContainer}>
-        {(['special', 'regularize'] as const).map((key, idx) => {
+        {availableTabs.map((key, idx) => {
           const icons = { special: 'flash-outline' as const, regularize: 'calendar-outline' as const };
           const labels = { special: 'Special', regularize: 'Regularize' };
           const isActive = activeTab === key;
@@ -583,12 +614,14 @@ export default function RequestsScreen() {
           );
         })}
       </View>
+      )}
 
       <ScrollView style={s.scroll} showsVerticalScrollIndicator={false}
-        contentContainerStyle={{ paddingBottom: 28 }}>
-        {activeTab === 'special'
-          ? <SpecialTab onOpenModal={(fn) => { openSpecialRef.current = fn; }} />
-          : <RegularizeTab onOpenModal={(fn) => { openRegRef.current = fn; }} />}
+        contentContainerStyle={{ paddingBottom: 140 }}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={handleRefresh} tintColor={C.primary} colors={[C.primary]} />}>
+        {availableTabs.length === 0 ? null : activeTab === 'special'
+          ? <SpecialTab onOpenModal={(fn) => { openSpecialRef.current = fn; }} onRefresh={(fn) => { refreshSpecialRef.current = fn; }} />
+          : <RegularizeTab onOpenModal={(fn) => { openRegRef.current = fn; }} onRefresh={(fn) => { refreshRegRef.current = fn; }} />}
       </ScrollView>
     </SafeAreaView>
   );

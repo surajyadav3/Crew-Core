@@ -3,7 +3,7 @@
     "name": "Crewcore HRMS",
     "slug": "crew-core",
     "scheme": "crew-core",
-    "version": "1.1.12",
+    "version": "1.1.13",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
@@ -15,7 +15,7 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.crewcore.app",
-      "buildNumber": "5",
+      "buildNumber": "6",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false,
         "UIBackgroundModes": ["location"],
@@ -25,7 +25,7 @@
     },
     "android": {
       "package": "com.crewcore.app",
-      "versionCode": 38,
+      "versionCode": 39,
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#5849C2"

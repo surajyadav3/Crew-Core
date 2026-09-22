@@ -54,10 +54,20 @@ serve(async (req) => {
     }
 
     // Record in-app notification history for every recipient, push or not.
+    // This must go to `app_notifications` — the table services/notificationService.ts
+    // (listMyNotifications / countUnreadNotifications / the Notices screen's unread
+    // badge) actually reads. It previously wrote to `notifications`, an older table
+    // the client stopped reading from, so every punch/leave notification sent through
+    // this function was silently invisible in the app's notification history even
+    // though the push itself still arrived. `app_notifications` isn't defined in this
+    // repo's migration.sql (schema drift — same gap noted in hardening_migration.sql
+    // for request_quotas/special_requests), so its column shape here is inferred from
+    // notifyProfiles() in notificationService.ts, the one confirmed-working writer.
     const notificationRows = profileIds.map((profile_id) => ({
-      tenant_id, profile_id, type, title, body: body ?? '', data: data ?? {},
+      tenant_id, profile_id, actor_id: null, type, title, body: body ?? '',
+      link_key: null, related_id: null,
     }))
-    const { error: notifError } = await supabase.from('notifications').insert(notificationRows)
+    const { error: notifError } = await supabase.from('app_notifications').insert(notificationRows)
     if (notifError) throw notifError
 
     // Fetch push tokens for those recipients and send via Expo Push API.

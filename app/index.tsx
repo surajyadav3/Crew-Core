@@ -13,7 +13,8 @@ export default function Index() {
     );
   }
 
-  if (!user || !profile) return <Redirect href={'/login' as any} />;
+  if (!user) return <Redirect href={'/login' as any} />;
+  if (!profile) return <Redirect href={'/register' as any} />;
   return <Redirect href={'/(tabs)' as any} />;
 }
 

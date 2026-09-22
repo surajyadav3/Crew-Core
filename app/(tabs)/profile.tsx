@@ -6,8 +6,21 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { useAuth } from '@/context/AuthContext';
+import { supabase } from '@/lib/supabase';
 import { fmt, fmtDate, fmtTime12 } from '@/lib/helpers';
 import { Colors as C } from '@/constants/Colors';
+
+// Masks all but the last 4 characters of a sensitive ID (PAN/Aadhar/bank account),
+// e.g. "1234 5678 9012" -> "•••• •••• 9012". Mirrors the reveal/hide pattern already
+// used for Salary so PII isn't shown in full by default (shoulder-surfing risk).
+function maskTail(value: string, visible = 4) {
+  const v = (value || '').trim();
+  if (!v) return '—';
+  if (v.length <= visible) return v;
+  const tail = v.slice(-visible);
+  const maskedLen = v.length - visible;
+  return `${'•'.repeat(Math.min(maskedLen, 12))} ${tail}`;
+}
 
 function InfoRow({
   icon, label, value, last = false,
@@ -51,6 +64,23 @@ export default function ProfileScreen() {
   const { profile, tenant } = useAuth();
   const router = useRouter();
   const [showSalary, setShowSalary] = useState(false);
+  const [showSensitive, setShowSensitive] = useState(false);
+  const [managerName, setManagerName] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!profile?.manager_id) { setManagerName(null); return; }
+    let cancelled = false;
+    supabase
+      .from('profiles')
+      .select('first_name, last_name')
+      .eq('id', profile.manager_id)
+      .maybeSingle()
+      .then(({ data }) => {
+        if (cancelled || !data) return;
+        setManagerName([data.first_name, data.last_name].filter(Boolean).join(' '));
+      });
+    return () => { cancelled = true; };
+  }, [profile?.manager_id]);
   const headerAnim = useRef(new Animated.Value(0)).current;
   const cardsAnim = useRef(new Animated.Value(0)).current;
   const salaryAnim = useRef(new Animated.Value(0)).current;
@@ -104,7 +134,7 @@ export default function ProfileScreen() {
   return (
     <SafeAreaView style={s.safe} edges={['top']}>
       <ScrollView style={s.scroll} showsVerticalScrollIndicator={false}
-        contentContainerStyle={{ paddingBottom: 32 }}>
+        contentContainerStyle={{ paddingBottom: 140 }}>
 
         {/* ── Hero section ── */}
         <Animated.View style={[s.hero, { opacity: headerAnim, transform: [{ translateY: headerTranslate }] }]}>
@@ -168,14 +198,20 @@ export default function ProfileScreen() {
 
           {/* Verification & Bank Details */}
           <View style={s.section}>
-            <View style={s.sectionTitleRow}>
-              <View style={[s.sectionTitleDot, { backgroundColor: C.purple }]} />
-              <Text style={s.sectionTitle}>Verification & Bank Details</Text>
+            <View style={s.sectionHeaderRow}>
+              <View style={s.sectionTitleRow}>
+                <View style={[s.sectionTitleDot, { backgroundColor: C.purple }]} />
+                <Text style={s.sectionTitle}>Verification & Bank Details</Text>
+              </View>
+              <TouchableOpacity style={s.revealBtn} onPress={() => setShowSensitive((v) => !v)} activeOpacity={0.8}>
+                <Ionicons name={showSensitive ? 'eye-off-outline' : 'eye-outline'} size={14} color={C.primary} />
+                <Text style={s.revealText}>{showSensitive ? 'Hide' : 'Show'}</Text>
+              </TouchableOpacity>
             </View>
             <View style={s.card}>
-              <InfoRow icon="wallet-outline" label="Bank A/C No." value={profile?.bank_acc || '—'} />
-              <InfoRow icon="document-text-outline" label="PAN No." value={profile?.pan || '—'} />
-              <InfoRow icon="finger-print" label="Aadhar No." value={profile?.aadhar || '—'} last />
+              <InfoRow icon="wallet-outline" label="Bank A/C No." value={showSensitive ? (profile?.bank_acc || '—') : maskTail(profile?.bank_acc || '')} />
+              <InfoRow icon="document-text-outline" label="PAN No." value={showSensitive ? (profile?.pan || '—') : maskTail(profile?.pan || '')} />
+              <InfoRow icon="finger-print" label="Aadhar No." value={showSensitive ? (profile?.aadhar || '—') : maskTail(profile?.aadhar || '')} last />
             </View>
           </View>
 
@@ -189,6 +225,7 @@ export default function ProfileScreen() {
               <InfoRow icon="business-outline" label="Company" value={tenant?.company_name || '—'} />
               <InfoRow icon="briefcase-outline" label="Department" value={profile?.department || '—'} />
               <InfoRow icon="ribbon-outline" label="Designation" value={profile?.designation || '—'} />
+              <InfoRow icon="person-circle-outline" label="Reporting Manager" value={managerName || (profile?.manager_id ? '—' : 'Not assigned')} />
               <InfoRow icon="people-outline" label="Role" value={roleLabel(profile?.role || '')} />
               <InfoRow icon="checkmark-circle-outline" label="Status" value={profile?.status || '—'} />
               <InfoRow icon="time-outline" label="Shift Hours" value={shiftLabel()} />
@@ -254,6 +291,16 @@ export default function ProfileScreen() {
                 icon="flash-outline" label="My Requests"
                 color={C.purple} bg="#EDE9FE"
                 onPress={() => router.push('/requests' as any)}
+              />
+              <QuickLinkRow
+                icon="create-outline" label="Edit Profile Details"
+                color={C.teal} bg={C.tealBg}
+                onPress={() => router.push('/profile-details' as any)}
+              />
+              <QuickLinkRow
+                icon="apps-outline" label="More Tools"
+                color={C.amber} bg={C.amberBg}
+                onPress={() => router.push('/more' as any)}
                 last
               />
             </View>

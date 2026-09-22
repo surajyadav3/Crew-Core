@@ -1,37 +1,18 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import {
-  View, Text, ScrollView, StyleSheet, TouchableOpacity, ActivityIndicator, Animated, Easing,
+  View, Text, ScrollView, StyleSheet, TouchableOpacity, ActivityIndicator, Animated, Easing, RefreshControl,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import * as Location from 'expo-location';
-import * as StoreReview from 'expo-store-review';
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useFocusEffect } from '@react-navigation/native';
 import { useAuth } from '@/context/AuthContext';
-import {
-  fetchMyMonthAttendance,
-  clockIn as svcClockIn,
-  clockOut as svcClockOut,
-} from '@/services/attendanceService';
+import { useClockInOut } from '@/hooks/useClockInOut';
+import { fetchMyMonthAttendance } from '@/services/attendanceService';
+import { listHolidays } from '@/services/holidayService';
 import { showToast } from '@/components/Toast';
-import {
-  todayStr, dateStr, timeStr, fmtTime12, diffHours, fmtDuration, monthLabel,
-  calculateDistance, fmtLiveClock, fmtLiveDate,
-} from '@/lib/helpers';
-import { presentLocalNotification } from '@/lib/pushNotifications';
+import { todayStr, dateStr, fmtTime12, fmtHMS, fmtDate, monthLabel } from '@/lib/helpers';
 
 import { Colors as C } from '@/constants/Colors';
-
-const CLOCK_OUT_COUNT_KEY = 'clock_out_count';
-
-async function maybeAskReview() {
-  try {
-    const raw = await AsyncStorage.getItem(CLOCK_OUT_COUNT_KEY);
-    const count = parseInt(raw || '0', 10) + 1;
-    await AsyncStorage.setItem(CLOCK_OUT_COUNT_KEY, String(count));
-    if (count === 3 && await StoreReview.hasAction()) await StoreReview.requestReview();
-  } catch {}
-}
 
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const STATUS_COLORS: Record<string, string> = {
@@ -76,107 +57,43 @@ function StatusPulse({ active }: { active: boolean }) {
 
 export default function AttendanceScreen() {
   const { profile, tenant } = useAuth();
+  const clock = useClockInOut();
   const [attMonth, setAttMonth] = useState(new Date().getMonth());
   const [attYear, setAttYear] = useState(new Date().getFullYear());
+  const [selectedDate, setSelectedDate] = useState(todayStr());
   const [myRecords, setMyRecords] = useState<any[]>([]);
-  const [myPunches, setMyPunches] = useState<any>({});
-  const [isClockedIn, setIsClockedIn] = useState(false);
-  const [locationStatus, setLocationStatus] = useState('Loading…');
-  const [liveClock, setLiveClock] = useState('');
-  const [liveDate, setLiveDate] = useState('');
-  const [timerDisplay, setTimerDisplay] = useState('00:00:00');
+  const [holidays, setHolidays] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
-  const [actionLoading, setActionLoading] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
 
-  const clockRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const btnScale = useRef(new Animated.Value(1)).current;
 
   const fetchData = useCallback(async () => {
     if (!profile || !tenant) return;
-    setLoading(true);
-    const { data } = await fetchMyMonthAttendance(profile.id, attYear, attMonth);
+    const { data, error } = await fetchMyMonthAttendance(profile.id, attYear, attMonth);
+    if (error) { showToast('Could not load attendance records.', 'error'); return; }
     setMyRecords(data);
-    const todayRec = data.find((r: any) => r.date === todayStr());
-    if (todayRec) {
-      const ins = (todayRec.punches || []).filter((p: any) => p.punch_type === 'in').length;
-      const outs = (todayRec.punches || []).filter((p: any) => p.punch_type === 'out').length;
-      setIsClockedIn(ins > outs);
-      setMyPunches(todayRec);
-    } else {
-      setIsClockedIn(false);
-      setMyPunches({});
-    }
-    setLoading(false);
   }, [profile, tenant, attMonth, attYear]);
 
-  useEffect(() => { fetchData(); }, [fetchData]);
+  useFocusEffect(useCallback(() => {
+    setLoading(true);
+    Promise.all([fetchData(), clock.refresh()]).finally(() => setLoading(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fetchData]));
 
-  useEffect(() => {
-    const tick = () => { setLiveClock(fmtLiveClock(new Date())); setLiveDate(fmtLiveDate(new Date())); };
-    tick();
-    clockRef.current = setInterval(tick, 1000);
-    return () => { if (clockRef.current) clearInterval(clockRef.current); };
-  }, []);
-
-  useEffect(() => {
-    const tickTimer = () => {
-      const todayRec = myPunches;
-      if (!todayRec?.punches?.length) { setTimerDisplay('00:00:00'); return; }
-      const sorted = [...todayRec.punches].sort((a: any, b: any) => a.punch_time.localeCompare(b.punch_time));
-      let totalSecs = 0;
-      const ins = sorted.filter((p: any) => p.punch_type === 'in');
-      const outs = sorted.filter((p: any) => p.punch_type === 'out');
-      for (let i = 0; i < ins.length; i++) {
-        const outTime = outs[i]?.punch_time || timeStr(new Date());
-        totalSecs += diffHours(ins[i].punch_time, outTime) * 3600;
-      }
-      const h = Math.floor(totalSecs / 3600);
-      const m = Math.floor((totalSecs % 3600) / 60);
-      const sec = Math.floor(totalSecs % 60);
-      setTimerDisplay(`${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`);
-    };
-    tickTimer();
-    timerRef.current = setInterval(tickTimer, 1000);
-    return () => { if (timerRef.current) clearInterval(timerRef.current); };
-  }, [myPunches]);
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    await Promise.all([fetchData(), clock.refresh()]);
+    setRefreshing(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fetchData]);
 
   useEffect(() => {
     if (!tenant) return;
-    setLocationStatus(
-      tenant.geofence_lat && tenant.geofence_lng
-        ? 'Tap clock in to verify location'
-        : 'Geofencing not configured',
-    );
-  }, [tenant]);
-
-  const checkGeofence = useCallback(async (): Promise<{ loc: { lat: number; lng: number } | null; msg: string }> => {
-    if (!tenant?.geofence_lat || !tenant?.geofence_lng) {
-      setLocationStatus('Geofencing not configured');
-      return { loc: { lat: 0, lng: 0 }, msg: 'Geofencing not configured' };
-    }
-    const { status } = await Location.requestForegroundPermissionsAsync();
-    if (status !== 'granted') {
-      const msg = 'Location permission denied';
-      setLocationStatus(msg);
-      return { loc: null, msg };
-    }
-    try {
-      const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
-      const dist = calculateDistance(pos.coords.latitude, pos.coords.longitude, tenant.geofence_lat, tenant.geofence_lng);
-      const radius = tenant.geofence_radius || 200;
-      if (dist > radius) {
-        const msg = `Outside office area (${Math.round(dist)}m away)`;
-        setLocationStatus(msg);
-        return { loc: null, msg };
-      }
-      setLocationStatus('Within office area ✓');
-      return { loc: { lat: pos.coords.latitude, lng: pos.coords.longitude }, msg: 'Within office area ✓' };
-    } catch {
-      const msg = 'Unable to get location — check GPS';
-      setLocationStatus(msg);
-      return { loc: null, msg };
-    }
+    listHolidays(tenant.id).then(({ data, error }) => {
+      if (error) { showToast('Could not load holidays.', 'error'); return; }
+      setHolidays(data);
+    });
   }, [tenant]);
 
   const animateBtn = () => {
@@ -186,45 +103,8 @@ export default function AttendanceScreen() {
     ]).start();
   };
 
-  const handleClockIn = async () => {
-    if (!profile || !tenant) { showToast('Account setup incomplete.', 'error'); return; }
-    if (isClockedIn) { showToast('Already clocked in!', 'warning'); return; }
-    animateBtn();
-    setActionLoading(true);
-    const { loc, msg } = await checkGeofence();
-    if (loc === null) { showToast(msg, 'error'); setActionLoading(false); return; }
-    try {
-      await svcClockIn(tenant.id, profile.id, tenant, loc.lat !== 0 ? loc : null);
-      const inTime = fmtTime12(timeStr(new Date()));
-      showToast(`Clocked in at ${inTime}`, 'success');
-      presentLocalNotification('Clocked In ✓', `You clocked in at ${inTime}`, { type: 'clock_in' });
-      fetchData();
-    } catch (err: any) {
-      showToast('Clock in failed: ' + err.message, 'error');
-    } finally {
-      setActionLoading(false);
-    }
-  };
-
-  const handleClockOut = async () => {
-    if (!isClockedIn) { showToast('Not clocked in!', 'warning'); return; }
-    animateBtn();
-    setActionLoading(true);
-    const { loc, msg } = await checkGeofence();
-    if (loc === null) { showToast(msg, 'error'); setActionLoading(false); return; }
-    try {
-      const { total } = await svcClockOut(profile!.id, loc.lat !== 0 ? loc : null);
-      const worked = fmtDuration(total);
-      showToast(`Clocked out. Worked ${worked}`, 'success');
-      presentLocalNotification('Clocked Out', `You worked ${worked} today.`, { type: 'clock_out' });
-      fetchData();
-      maybeAskReview();
-    } catch (err: any) {
-      showToast('Clock out failed: ' + err.message, 'error');
-    } finally {
-      setActionLoading(false);
-    }
-  };
+  const handleClockIn = () => { animateBtn(); clock.handleClockIn(); };
+  const handleClockOut = () => { animateBtn(); clock.handleClockOut(); };
 
   const changeMonth = (delta: number) => {
     let m = attMonth + delta, y = attYear;
@@ -250,6 +130,7 @@ export default function AttendanceScreen() {
       const isToday = ds === todayStr();
       const isFuture = date > today;
       const isWeekend = date.getDay() === 0 || date.getDay() === 6;
+      const holiday = holidays.find((h) => h.date === ds && h.status === 'Approved');
       const rec = myRecords.find((r) => r.date === ds);
 
       let bg = 'transparent';
@@ -257,6 +138,7 @@ export default function AttendanceScreen() {
 
       if (isToday) bg = C.primary;
       else if (isFuture) textColor = '#CBD5E1';
+      else if (holiday) { bg = C.teal + '22'; textColor = C.teal; }
       else if (isWeekend) textColor = C.muted;
       else if (rec) {
         bg = (STATUS_COLORS[rec.status] || C.primary) + '22';
@@ -266,13 +148,25 @@ export default function AttendanceScreen() {
         textColor = C.danger;
       }
 
+      const isSelected = ds === selectedDate;
+
       cells.push(
-        <View key={d} style={[s.calCell, { backgroundColor: bg, borderRadius: 10 }]}>
+        <TouchableOpacity
+          key={d}
+          style={[
+            s.calCell,
+            { backgroundColor: bg, borderRadius: 10 },
+            isSelected && !isToday && s.calCellSelected,
+          ]}
+          onPress={() => setSelectedDate(ds)}
+          disabled={isFuture}
+          activeOpacity={0.6}
+        >
           <Text style={[s.calDay, { color: isToday ? '#fff' : textColor, fontWeight: isToday ? '800' : '400' }]}>{d}</Text>
-          {rec && !isToday && (
+          {rec && !isToday && !holiday && (
             <View style={[s.calDot, { backgroundColor: STATUS_COLORS[rec?.status] || C.primary }]} />
           )}
-        </View>
+        </TouchableOpacity>
       );
     }
     return cells;
@@ -283,22 +177,41 @@ export default function AttendanceScreen() {
   for (let d = 1; d <= new Date(attYear, attMonth + 1, 0).getDate(); d++) {
     const date = new Date(attYear, attMonth, d);
     if (date > today || date.getDay() === 0 || date.getDay() === 6) continue;
-    const rec = myRecords.find((r) => r.date === dateStr(date));
+    const ds = dateStr(date);
+    if (holidays.find((h) => h.date === ds && h.status === 'Approved')) continue;
+    const rec = myRecords.find((r) => r.date === ds);
     if (!rec?.status) { if (date < today) summary.absent++; continue; }
     if (rec.status === 'Present') summary.present++;
     else if (rec.status === 'Late') { summary.late++; summary.present++; }
     else if (rec.status === 'Half Day') summary.halfDay++;
     else if (rec.status === 'Leave') summary.leaves++;
     else if (rec.status === 'Absent') summary.absent++;
-    summary.totalHours += rec.total_hours || 0;
+    // Today's total_hours is only (re)written on clock-out, so while still
+    // clocked in it excludes today's in-progress session — skip it here and
+    // add the live-ticking total below instead (mirrors the Home screen).
+    const isToday = attYear === today.getFullYear() && attMonth === today.getMonth() && d === today.getDate();
+    if (!isToday) summary.totalHours += rec.total_hours || 0;
+  }
+  if (attYear === today.getFullYear() && attMonth === today.getMonth()) {
+    summary.totalHours += clock.timerSeconds / 3600;
   }
 
-  const statusText = isClockedIn ? 'Currently Working' : myPunches?.punches?.length ? 'Clocked Out' : 'Not Clocked In';
+  const statusText = clock.isClockedIn ? 'Currently Working' : clock.myPunches?.punches?.length ? 'Clocked Out' : 'Not Clocked In';
+
+  // The clock hook tracks today's punches live (including the one just made,
+  // before a refetch would pick it up); any other date reads straight from the
+  // month's already-fetched records (fetchMyMonthAttendance selects punches(*)
+  // alongside each attendance row, so no extra request is needed here).
+  const isSelectedToday = selectedDate === todayStr();
+  const selectedPunches = isSelectedToday
+    ? clock.myPunches?.punches || []
+    : myRecords.find((r) => r.date === selectedDate)?.punches || [];
 
   return (
     <SafeAreaView style={s.safe} edges={['top']}>
       <ScrollView style={s.scroll} showsVerticalScrollIndicator={false}
-        contentContainerStyle={{ paddingBottom: 28 }}>
+        contentContainerStyle={{ paddingBottom: 140 }}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={C.primary} colors={[C.primary]} />}>
 
         {/* ── Page header ── */}
         <View style={s.pageHeader}>
@@ -314,21 +227,21 @@ export default function AttendanceScreen() {
           {/* Time + Status row */}
           <View style={s.clockTopRow}>
             <View style={s.clockLeft}>
-              <Text style={s.liveTime}>{liveClock}</Text>
-              <Text style={s.liveDate}>{liveDate}</Text>
+              <Text style={s.liveTime}>{clock.liveClock}</Text>
+              <Text style={s.liveDate}>{clock.liveDate}</Text>
               <View style={s.statusRow}>
-                <StatusPulse active={isClockedIn} />
+                <StatusPulse active={clock.isClockedIn} />
                 <Text style={s.statusText}>{statusText}</Text>
               </View>
               <View style={s.locationRow}>
                 <Ionicons name="location-outline" size={11} color="rgba(255,255,255,0.4)" />
-                <Text style={s.locationText} numberOfLines={1}>{locationStatus}</Text>
+                <Text style={s.locationText} numberOfLines={1}>{clock.locationStatus}</Text>
               </View>
             </View>
             <View style={s.timerBox}>
               <Text style={s.timerLabel}>TODAY'S HOURS</Text>
-              <Text style={s.timerValue}>{timerDisplay}</Text>
-              {isClockedIn && (
+              <Text style={s.timerValue}>{clock.timerDisplay}</Text>
+              {clock.isClockedIn && (
                 <View style={s.timerActivePill}>
                   <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: C.success }} />
                   <Text style={s.timerActiveTxt}>Live</Text>
@@ -340,44 +253,27 @@ export default function AttendanceScreen() {
           {/* Divider */}
           <View style={s.widgetDivider} />
 
-          {/* Clock buttons */}
-          <View style={s.clockBtns}>
-            <Animated.View style={[{ flex: 1 }, { transform: [{ scale: btnScale }] }]}>
-              <TouchableOpacity
-                style={[s.clockInBtn, (isClockedIn || actionLoading) && s.btnDisabled]}
-                onPress={handleClockIn}
-                disabled={isClockedIn || actionLoading}
-                activeOpacity={0.85}
-              >
-                {actionLoading && !isClockedIn
-                  ? <ActivityIndicator color="#fff" size="small" />
-                  : <>
-                      <View style={s.clockBtnIcon}>
-                        <Ionicons name="log-in-outline" size={20} color={C.success} />
-                      </View>
-                      <Text style={s.clockBtnText}>Clock In</Text>
-                    </>}
-              </TouchableOpacity>
-            </Animated.View>
-
-            <Animated.View style={[{ flex: 1 }, { transform: [{ scale: btnScale }] }]}>
-              <TouchableOpacity
-                style={[s.clockOutBtn, (!isClockedIn || actionLoading) && s.btnDisabled]}
-                onPress={handleClockOut}
-                disabled={!isClockedIn || actionLoading}
-                activeOpacity={0.85}
-              >
-                {actionLoading && isClockedIn
-                  ? <ActivityIndicator color="#fff" size="small" />
-                  : <>
-                      <View style={[s.clockBtnIcon, { backgroundColor: 'rgba(239,68,68,0.15)' }]}>
-                        <Ionicons name="log-out-outline" size={20} color={C.danger} />
-                      </View>
-                      <Text style={[s.clockBtnText, { color: C.danger }]}>Clock Out</Text>
-                    </>}
-              </TouchableOpacity>
-            </Animated.View>
-          </View>
+          {/* Clock button — single full-width control that swaps state, rather
+              than showing both actions side by side with one disabled. */}
+          <Animated.View style={{ transform: [{ scale: btnScale }] }}>
+            <TouchableOpacity
+              style={[s.clockActionBtn, clock.isClockedIn ? s.clockOutBtn : s.clockInBtn, clock.actionLoading && s.btnDisabled]}
+              onPress={clock.isClockedIn ? handleClockOut : handleClockIn}
+              disabled={clock.actionLoading}
+              activeOpacity={0.85}
+            >
+              {clock.actionLoading
+                ? <ActivityIndicator color="#fff" size="small" />
+                : <>
+                    <Ionicons
+                      name={clock.isClockedIn ? 'log-out-outline' : 'log-in-outline'}
+                      size={20}
+                      color="#fff"
+                    />
+                    <Text style={s.clockBtnText}>{clock.isClockedIn ? 'Clock Out' : 'Clock In'}</Text>
+                  </>}
+            </TouchableOpacity>
+          </Animated.View>
         </View>
 
         {/* ── Summary strip ── */}
@@ -388,7 +284,7 @@ export default function AttendanceScreen() {
             { val: summary.halfDay, lbl: 'Half Day', color: '#F97316' },
             { val: summary.late, lbl: 'Late', color: C.warning },
             { val: summary.leaves, lbl: 'Leaves', color: C.purple },
-            { val: fmtDuration(summary.totalHours), lbl: 'Hrs', color: C.primary },
+            { val: fmtHMS(summary.totalHours * 3600), lbl: 'Hrs', color: C.primary },
           ].map((item, idx) => (
             <View key={item.lbl} style={[s.summaryItem, idx < 5 && s.summaryItemBorder]}>
               <Text style={[s.summaryVal, { color: item.color }]}>{item.val}</Text>
@@ -430,22 +326,24 @@ export default function AttendanceScreen() {
           </View>
         </View>
 
-        {/* ── Today's Timeline ── */}
+        {/* ── Selected day's punch timeline ── */}
         <View style={s.card}>
           <View style={s.cardHeader}>
             <View style={s.cardTitleRow}>
               <View style={[s.cardTitleDot, { backgroundColor: C.success }]} />
-              <Text style={s.cardTitle}>Today's Timeline</Text>
+              <Text style={s.cardTitle}>{isSelectedToday ? "Today's Timeline" : fmtDate(selectedDate)}</Text>
             </View>
           </View>
-          {!myPunches?.punches?.length ? (
+          {!selectedPunches.length ? (
             <View style={s.emptyRow}>
               <Ionicons name="time-outline" size={28} color={C.muted} />
-              <Text style={s.emptyText}>No punches recorded today.</Text>
+              <Text style={s.emptyText}>
+                {isSelectedToday ? 'No punches recorded today.' : 'No punches recorded on this date.'}
+              </Text>
             </View>
           ) : (
             <View style={s.timeline}>
-              {[...myPunches.punches]
+              {[...selectedPunches]
                 .sort((a: any, b: any) => a.punch_time.localeCompare(b.punch_time))
                 .map((p: any, i: number, arr: any[]) => (
                   <View key={p.id || i} style={s.timelineItem}>
@@ -525,26 +423,15 @@ const s = StyleSheet.create({
 
   widgetDivider: { height: 1, backgroundColor: 'rgba(255,255,255,0.07)', marginBottom: 16 },
 
-  clockBtns: { flexDirection: 'row', gap: 10 },
-  clockInBtn: {
-    flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
-    backgroundColor: 'rgba(16,185,129,0.15)',
-    borderRadius: 14, paddingVertical: 14, gap: 8,
-    borderWidth: 1, borderColor: 'rgba(16,185,129,0.3)',
+  clockActionBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    borderRadius: 14, paddingVertical: 15, gap: 8,
+    shadowOpacity: 0.35, shadowRadius: 12, shadowOffset: { width: 0, height: 4 }, elevation: 6,
   },
-  clockOutBtn: {
-    flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
-    backgroundColor: 'rgba(239,68,68,0.1)',
-    borderRadius: 14, paddingVertical: 14, gap: 8,
-    borderWidth: 1, borderColor: 'rgba(239,68,68,0.2)',
-  },
-  clockBtnIcon: {
-    width: 34, height: 34, borderRadius: 10,
-    backgroundColor: 'rgba(16,185,129,0.15)',
-    alignItems: 'center', justifyContent: 'center',
-  },
-  clockBtnText: { fontSize: 14, fontWeight: '800', color: C.success },
-  btnDisabled: { opacity: 0.35 },
+  clockInBtn: { backgroundColor: C.success, shadowColor: C.success },
+  clockOutBtn: { backgroundColor: C.danger, shadowColor: C.danger },
+  clockBtnText: { fontSize: 15, fontWeight: '800', color: '#fff' },
+  btnDisabled: { opacity: 0.6 },
 
   // Summary strip
   summaryStrip: {
@@ -579,6 +466,7 @@ const s = StyleSheet.create({
   calendar: { flexDirection: 'row', flexWrap: 'wrap' },
   calHeader: { width: '14.28%', textAlign: 'center', fontSize: 10, color: C.muted, fontWeight: '700', paddingVertical: 6, textTransform: 'uppercase' },
   calCell: { width: '14.28%', aspectRatio: 1, alignItems: 'center', justifyContent: 'center', padding: 1 },
+  calCellSelected: { borderWidth: 1.5, borderColor: C.primary },
   calDay: { fontSize: 12, color: C.text },
   calDot: { width: 4, height: 4, borderRadius: 2, marginTop: 2 },
   legend: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginTop: 12, paddingTop: 10, borderTopWidth: 1, borderTopColor: C.border },

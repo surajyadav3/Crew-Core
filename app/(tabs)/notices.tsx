@@ -1,11 +1,13 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity, Modal,
-  TextInput, ActivityIndicator, KeyboardAvoidingView, Platform,
+  TextInput, ActivityIndicator, KeyboardAvoidingView, Platform, RefreshControl,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '@/context/AuthContext';
+import { useFeatures } from '@/context/FeatureContext';
+import { useForegroundRefresh } from '@/hooks/useForegroundRefresh';
 import { listPolicies, createPolicy, markPolicyRead, listPolicyReadCounts, listPolicyReads } from '@/services/policyService';
 import { listAnnouncements, createAnnouncement } from '@/services/announcementService';
 import { listMyNotifications, markNotificationRead } from '@/services/notificationService';
@@ -33,13 +35,25 @@ const NOTIF_ICON: Record<string, keyof typeof Ionicons.glyphMap> = {
 
 export default function NoticesScreen() {
   const { profile, tenant } = useAuth();
+  const { isEnabled } = useFeatures();
   const canPost = profile?.role === 'admin' || profile?.role === 'superadmin';
 
+  // 'alerts' isn't a toggleable feature on web (it's CrewCore's own notification
+  // feed, not a sidebar item there), so isEnabled('alerts') naturally always
+  // resolves true — no matching row is ever written for it.
+  const visibleSegments = SEGMENTS.filter((seg) => isEnabled(seg.key));
+
   const [segment, setSegment] = useState<Segment>('announcements');
+  useEffect(() => {
+    if (!visibleSegments.some((s) => s.key === segment) && visibleSegments.length) {
+      setSegment(visibleSegments[0].key);
+    }
+  }, [visibleSegments.map((s) => s.key).join(',')]);
   const [policies, setPolicies] = useState<any[]>([]);
   const [announcements, setAnnouncements] = useState<any[]>([]);
   const [notifications, setNotifications] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [showModal, setShowModal] = useState(false);
   const [form, setForm] = useState({ title: '', body: '' });
   const [saving, setSaving] = useState(false);
@@ -49,7 +63,6 @@ export default function NoticesScreen() {
 
   const fetchAll = useCallback(async () => {
     if (!tenant || !profile) return;
-    setLoading(true);
     const [polRes, annRes, notifRes] = await Promise.all([
       listPolicies(tenant.id),
       listAnnouncements(tenant.id),
@@ -67,7 +80,6 @@ export default function NoticesScreen() {
     }
     if (annRes.error) showToast(annRes.error.message, 'error'); else setAnnouncements(annRes.data);
     if (notifRes.error) showToast(notifRes.error.message, 'error'); else setNotifications(notifRes.data);
-    setLoading(false);
   }, [tenant, profile]);
 
   const handleOpenPolicy = async (item: any) => {
@@ -84,7 +96,13 @@ export default function NoticesScreen() {
     markPolicyRead(item.id, profile.id, tenant.id);
   };
 
-  useEffect(() => { fetchAll(); }, [fetchAll]);
+  useForegroundRefresh(fetchAll, setLoading);
+
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    await fetchAll();
+    setRefreshing(false);
+  }, [fetchAll]);
 
   const handleSubmit = async () => {
     if (!form.title.trim() || !form.body.trim()) { showToast('Please fill in both fields.', 'error'); return; }
@@ -110,9 +128,9 @@ export default function NoticesScreen() {
   };
 
   const handleOpenNotification = async (n: any) => {
-    if (!n.read) {
+    if (!n.is_read) {
       await markNotificationRead(n.id);
-      setNotifications((prev) => prev.map((x) => (x.id === n.id ? { ...x, read: true } : x)));
+      setNotifications((prev) => prev.map((x) => (x.id === n.id ? { ...x, is_read: true } : x)));
     }
   };
 
@@ -135,7 +153,7 @@ export default function NoticesScreen() {
       </View>
 
       <View style={s.segmentRow}>
-        {SEGMENTS.map((seg) => (
+        {visibleSegments.map((seg) => (
           <TouchableOpacity
             key={seg.key}
             style={[s.segmentBtn, segment === seg.key && s.segmentBtnActive]}
@@ -148,7 +166,8 @@ export default function NoticesScreen() {
         ))}
       </View>
 
-      <ScrollView style={s.scroll} showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 28 }}>
+      <ScrollView style={s.scroll} showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 140 }}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={C.primary} colors={[C.primary]} />}>
         {loading ? (
           <View style={s.loadingBox}><ActivityIndicator color={C.primary} size="large" /></View>
         ) : list.length === 0 ? (
@@ -164,8 +183,8 @@ export default function NoticesScreen() {
         ) : segment === 'alerts' ? (
           <View style={s.list}>
             {notifications.map((n) => (
-              <TouchableOpacity key={n.id} style={[s.notifCard, !n.read && s.notifCardUnread]} onPress={() => handleOpenNotification(n)} activeOpacity={0.85}>
-                <View style={[s.notifIconWrap, !n.read && { backgroundColor: C.primaryBg }]}>
+              <TouchableOpacity key={n.id} style={[s.notifCard, !n.is_read && s.notifCardUnread]} onPress={() => handleOpenNotification(n)} activeOpacity={0.85}>
+                <View style={[s.notifIconWrap, !n.is_read && { backgroundColor: C.primaryBg }]}>
                   <Ionicons name={NOTIF_ICON[n.type] || 'notifications-outline'} size={18} color={C.primary} />
                 </View>
                 <View style={{ flex: 1 }}>
@@ -173,7 +192,7 @@ export default function NoticesScreen() {
                   {!!n.body && <Text style={s.notifBody} numberOfLines={2}>{n.body}</Text>}
                   <Text style={s.notifTime}>{fmtDate(n.created_at)}</Text>
                 </View>
-                {!n.read && <View style={s.unreadDot} />}
+                {!n.is_read && <View style={s.unreadDot} />}
               </TouchableOpacity>
             ))}
           </View>

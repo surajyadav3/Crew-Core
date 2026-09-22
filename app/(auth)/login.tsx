@@ -2,74 +2,26 @@ import React, { useState, useCallback, useEffect, useRef } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, StyleSheet,
   ActivityIndicator, KeyboardAvoidingView, Platform, ScrollView, Alert,
-  Animated, Dimensions, Easing,
+  Animated, Dimensions, Easing, Image,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { useFocusEffect } from '@react-navigation/native';
 import { useAuth } from '@/context/AuthContext';
 import { detectIdentifierType } from '@/services/otpService';
+import { supabase } from '@/lib/supabase';
+import { validatePassword } from '@/lib/helpers';
+import { showToast } from '@/components/Toast';
+import OtpBoxes from '@/components/OtpBoxes';
 import { Colors as C } from '@/constants/Colors';
 
 const { width: W, height: H } = Dimensions.get('window');
 
-function OtpBoxes({ value, onChange }: { value: string; onChange: (v: string) => void }) {
-  const inputRef = useRef<TextInput>(null);
-  const digits = value.padEnd(8, ' ').split('').slice(0, 8);
-  const boxAnims = useRef(Array.from({ length: 8 }, () => new Animated.Value(1))).current;
-
-  useEffect(() => {
-    const t = setTimeout(() => inputRef.current?.focus(), 120);
-    return () => clearTimeout(t);
-  }, []);
-
-  useEffect(() => {
-    const idx = Math.min(value.length, 7);
-    if (value.length > 0) {
-      Animated.sequence([
-        Animated.timing(boxAnims[idx], { toValue: 1.12, duration: 100, useNativeDriver: true }),
-        Animated.timing(boxAnims[idx], { toValue: 1, duration: 100, useNativeDriver: true }),
-      ]).start();
-    }
-  }, [value]);
-
-  return (
-    <TouchableOpacity
-      style={s.otpRow}
-      onPress={() => inputRef.current?.focus()}
-      activeOpacity={1}
-    >
-      {digits.map((d, i) => (
-        <Animated.View
-          key={i}
-          style={[
-            s.otpBox,
-            d.trim() ? s.otpBoxFilled : null,
-            i === value.length && s.otpBoxActive,
-            { transform: [{ scale: boxAnims[i] }] },
-          ]}
-        >
-          <Text style={s.otpDigit}>{d.trim()}</Text>
-        </Animated.View>
-      ))}
-      <TextInput
-        ref={inputRef}
-        style={s.otpHidden}
-        value={value}
-        onChangeText={(t) => onChange(t.replace(/\D/g, '').slice(0, 8))}
-        keyboardType="number-pad"
-        maxLength={8}
-        caretHidden
-      />
-    </TouchableOpacity>
-  );
-}
-
 export default function LoginScreen() {
-  const { signIn, sendOtp, verifyOtp, user, profile, loading } = useAuth();
+  const { signIn, sendOtp, verifyOtp, user, profile, loading, signOut } = useAuth();
   const router = useRouter();
 
-  const [mode, setMode] = useState<'password' | 'otp'>('password');
+  const [mode, setMode] = useState<'password' | 'otp' | 'reset'>('password');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPass, setShowPass] = useState(false);
@@ -82,26 +34,34 @@ export default function LoginScreen() {
   const [successMsg, setSuccessMsg] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
+  // Set after OTP verification in 'reset' mode signs the user in — holds them
+  // on this screen to pick a new password instead of letting the redirect
+  // effect below take them straight into the dashboard on the old session.
+  const [awaitingNewPassword, setAwaitingNewPassword] = useState(false);
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmNewPassword, setConfirmNewPassword] = useState('');
+  const [showNewPass, setShowNewPass] = useState(false);
+
   // Entrance animations
   const logoAnim = useRef(new Animated.Value(0)).current;
   const formAnim = useRef(new Animated.Value(0)).current;
   const formTranslate = useRef(new Animated.Value(40)).current;
 
   useEffect(() => {
+    const native = Platform.OS !== 'web';
     Animated.sequence([
-      Animated.timing(logoAnim, { toValue: 1, duration: 600, easing: Easing.out(Easing.back(1.3)), useNativeDriver: true }),
+      Animated.timing(logoAnim, { toValue: 1, duration: 600, easing: Easing.out(Easing.back(1.3)), useNativeDriver: native }),
       Animated.parallel([
-        Animated.timing(formAnim, { toValue: 1, duration: 400, useNativeDriver: true }),
-        Animated.timing(formTranslate, { toValue: 0, duration: 400, easing: Easing.out(Easing.ease), useNativeDriver: true }),
+        Animated.timing(formAnim, { toValue: 1, duration: 400, useNativeDriver: native }),
+        Animated.timing(formTranslate, { toValue: 0, duration: 400, easing: Easing.out(Easing.ease), useNativeDriver: native }),
       ]),
     ]).start();
   }, []);
 
   useEffect(() => {
-    if (!loading && user && profile) {
-      router.replace('/' as any);
-    }
-  }, [user, profile, loading]);
+    if (loading || !user || awaitingNewPassword) return;
+    router.replace((profile ? '/' : '/register') as any);
+  }, [user, profile, loading, awaitingNewPassword]);
 
   // Always land on a clean, empty form — e.g. right after signing out.
   useFocusEffect(
@@ -118,6 +78,10 @@ export default function LoginScreen() {
         setResolvedId('');
         setError('');
         setSuccessMsg('');
+        setAwaitingNewPassword(false);
+        setNewPassword('');
+        setConfirmNewPassword('');
+        setShowNewPass(false);
       }
     }, [user])
   );
@@ -157,10 +121,14 @@ export default function LoginScreen() {
 
   const handleVerifyOtp = useCallback(async () => {
     setError('');
-    if (otp.length !== 8) { setError('Please enter the complete 8-digit OTP.'); return; }
+    if (otp.length !== 6) { setError('Please enter the complete 6-digit OTP.'); return; }
     setSubmitting(true);
     try {
       await verifyOtp(resolvedId, otp, false);
+      // In 'reset' mode, verifying the OTP just proved identity and signed the
+      // user in — hold them here to pick a new password instead of falling
+      // through to the dashboard on whatever their old password still is.
+      if (mode === 'reset') setAwaitingNewPassword(true);
     } catch (err: any) {
       if (err.message?.includes('expired')) setError('OTP expired. Please request a new one.');
       else if (err.message?.includes('invalid')) setError('Incorrect OTP. Please try again.');
@@ -168,18 +136,51 @@ export default function LoginScreen() {
     } finally {
       setSubmitting(false);
     }
-  }, [otp, resolvedId, verifyOtp]);
+  }, [otp, resolvedId, verifyOtp, mode]);
 
   useEffect(() => {
-    if (otpStep === 2 && otp.length === 8 && !submitting) handleVerifyOtp();
+    if (otpStep === 2 && otp.length === 6 && !submitting) handleVerifyOtp();
   }, [otp]);
+
+  const handleSetNewPassword = useCallback(async () => {
+    setError('');
+    const pwError = validatePassword(newPassword);
+    if (pwError) { setError(pwError); return; }
+    if (newPassword !== confirmNewPassword) { setError('Passwords do not match.'); return; }
+    setSubmitting(true);
+    try {
+      const { error: updateError } = await supabase.auth.updateUser({ password: newPassword });
+      if (updateError) throw updateError;
+      showToast('Password updated! Signing you in…', 'success');
+      setAwaitingNewPassword(false);
+    } catch (err: any) {
+      setError(err.message || 'Could not update password. Please try again.');
+    } finally {
+      setSubmitting(false);
+    }
+  }, [newPassword, confirmNewPassword]);
+
+  const handleCancelReset = useCallback(async () => {
+    // The OTP verify already opened a real session — don't strand the user
+    // half-signed-in on their old password if they back out of the reset.
+    setSubmitting(true);
+    try {
+      await signOut();
+    } finally {
+      setAwaitingNewPassword(false);
+      setMode('password');
+      setOtpStep(1);
+      setOtp('');
+      setNewPassword('');
+      setConfirmNewPassword('');
+      setSubmitting(false);
+    }
+  }, [signOut]);
 
   if (loading) {
     return (
       <View style={[s.container, { justifyContent: 'center', alignItems: 'center' }]}>
-        <View style={s.loadingLogo}>
-          <Ionicons name="briefcase" size={28} color="#fff" />
-        </View>
+        <Image source={require('@/assets/icon.png')} style={s.loadingLogo} resizeMode="contain" />
         <ActivityIndicator size="large" color={C.primary} style={{ marginTop: 24 }} />
         <Text style={[s.muted, { marginTop: 12 }]}>Loading workspace…</Text>
       </View>
@@ -196,9 +197,7 @@ export default function LoginScreen() {
           <View style={s.heroDecor2} />
           {/* Logo */}
           <Animated.View style={[s.logoWrap, { opacity: logoAnim, transform: [{ scale: logoAnim }] }]}>
-            <View style={s.logoIcon}>
-              <Ionicons name="briefcase" size={30} color="#fff" />
-            </View>
+            <Image source={require('@/assets/icon.png')} style={s.logoIcon} resizeMode="contain" />
             <Text style={s.logoName}>CrewCore</Text>
             <Text style={s.logoTagline}>Smart Payroll for Modern Teams</Text>
           </Animated.View>
@@ -210,25 +209,37 @@ export default function LoginScreen() {
           <Text style={s.subtitle}>Sign in to your company workspace</Text>
 
           {/* Mode toggle */}
-          <View style={s.toggleRow}>
-            {(['password', 'otp'] as const).map((m) => (
-              <TouchableOpacity
-                key={m}
-                style={[s.toggleBtn, mode === m && s.toggleActive]}
-                onPress={() => { setMode(m); setError(''); setSuccessMsg(''); }}
-                activeOpacity={0.8}
-              >
-                <Ionicons
-                  name={m === 'password' ? 'lock-closed-outline' : 'phone-portrait-outline'}
-                  size={14}
-                  color={mode === m ? '#fff' : C.muted}
-                />
-                <Text style={[s.toggleText, mode === m && s.toggleTextActive]}>
-                  {m === 'password' ? 'Password' : 'OTP Login'}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
+          {mode !== 'reset' && (
+            <View style={s.toggleRow}>
+              {(['password', 'otp'] as const).map((m) => (
+                <TouchableOpacity
+                  key={m}
+                  style={[s.toggleBtn, mode === m && s.toggleActive]}
+                  onPress={() => { setMode(m); setError(''); setSuccessMsg(''); }}
+                  activeOpacity={0.8}
+                >
+                  <Ionicons
+                    name={m === 'password' ? 'lock-closed-outline' : 'phone-portrait-outline'}
+                    size={14}
+                    color={mode === m ? '#fff' : C.muted}
+                  />
+                  <Text style={[s.toggleText, mode === m && s.toggleTextActive]}>
+                    {m === 'password' ? 'Password' : 'OTP Login'}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          )}
+          {mode === 'reset' && !awaitingNewPassword && (
+            <TouchableOpacity
+              style={s.resetBackRow}
+              onPress={() => { setMode('password'); setOtpStep(1); setOtp(''); setError(''); setSuccessMsg(''); }}
+              disabled={submitting}
+            >
+              <Ionicons name="arrow-back" size={14} color={C.muted} />
+              <Text style={s.resetBackText}>Back to sign in</Text>
+            </TouchableOpacity>
+          )}
 
           {/* Banners */}
           {!!error && (
@@ -283,12 +294,22 @@ export default function LoginScreen() {
                     value={password}
                     onChangeText={setPassword}
                     secureTextEntry={!showPass}
+                    autoCapitalize="none"
                     autoComplete="password"
                   />
                   <TouchableOpacity style={s.eyeBtn} onPress={() => setShowPass((v) => !v)}>
                     <Ionicons name={showPass ? 'eye-off-outline' : 'eye-outline'} size={18} color={C.muted} />
                   </TouchableOpacity>
                 </View>
+                <TouchableOpacity
+                  style={s.forgotRow}
+                  onPress={() => {
+                    setMode('reset'); setOtpStep(1); setOtp(''); setError(''); setSuccessMsg('');
+                    setIdentifier(email); setIdType(detectIdentifierType(email));
+                  }}
+                >
+                  <Text style={s.link}>Forgot password?</Text>
+                </TouchableOpacity>
               </View>
 
               <TouchableOpacity style={[s.btn, submitting && s.btnDisabled]} onPress={handlePasswordLogin} disabled={submitting} activeOpacity={0.85}>
@@ -302,9 +323,14 @@ export default function LoginScreen() {
             </>
           )}
 
-          {/* ── OTP Step 1 ── */}
-          {mode === 'otp' && otpStep === 1 && (
+          {/* ── OTP / Reset Step 1 ── */}
+          {(mode === 'otp' || mode === 'reset') && otpStep === 1 && (
             <>
+              {mode === 'reset' && (
+                <Text style={[s.subtitle, { marginTop: -8, marginBottom: 18 }]}>
+                  Enter your account email — we'll send a code to verify it's you before you pick a new password.
+                </Text>
+              )}
               <View style={s.group}>
                 <Text style={s.label}>Email Address</Text>
                 <View style={s.inputWrap}>
@@ -326,7 +352,7 @@ export default function LoginScreen() {
                     </View>
                   )}
                 </View>
-                <Text style={s.hint}>We'll send an 8-digit OTP to your email.</Text>
+                <Text style={s.hint}>We'll send a 6-digit OTP to your email.</Text>
               </View>
 
               <TouchableOpacity
@@ -345,8 +371,8 @@ export default function LoginScreen() {
             </>
           )}
 
-          {/* ── OTP Step 2 ── */}
-          {mode === 'otp' && otpStep === 2 && (
+          {/* ── OTP / Reset Step 2 ── */}
+          {(mode === 'otp' || mode === 'reset') && otpStep === 2 && !awaitingNewPassword && (
             <>
               <View style={s.otpHeader}>
                 <View style={s.otpHeaderIcon}>
@@ -361,9 +387,9 @@ export default function LoginScreen() {
               <OtpBoxes value={otp} onChange={setOtp} />
 
               <TouchableOpacity
-                style={[s.btn, (submitting || otp.length !== 8) && s.btnDisabled]}
+                style={[s.btn, (submitting || otp.length !== 6) && s.btnDisabled]}
                 onPress={handleVerifyOtp}
-                disabled={submitting || otp.length !== 8}
+                disabled={submitting || otp.length !== 6}
                 activeOpacity={0.85}
               >
                 {submitting
@@ -383,6 +409,85 @@ export default function LoginScreen() {
                 </TouchableOpacity>
               </View>
             </>
+          )}
+
+          {/* ── Reset Step 3: choose a new password (already signed in via OTP) ── */}
+          {mode === 'reset' && awaitingNewPassword && (
+            <>
+              <View style={s.otpHeader}>
+                <View style={s.otpHeaderIcon}>
+                  <Ionicons name="shield-checkmark" size={20} color={C.primary} />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={s.otpHeaderTitle}>Identity Verified</Text>
+                  <Text style={s.otpHeaderSub}>Choose a new password for your account</Text>
+                </View>
+              </View>
+
+              <View style={s.group}>
+                <Text style={s.label}>New Password</Text>
+                <View style={s.inputWrap}>
+                  <View style={s.inputIconWrap}>
+                    <Ionicons name="lock-closed-outline" size={16} color={C.primary} />
+                  </View>
+                  <TextInput
+                    style={[s.input, { paddingRight: 48 }]}
+                    placeholder="••••••••"
+                    placeholderTextColor={C.muted}
+                    value={newPassword}
+                    onChangeText={setNewPassword}
+                    secureTextEntry={!showNewPass}
+                    autoCapitalize="none"
+                    autoComplete="new-password"
+                  />
+                  <TouchableOpacity style={s.eyeBtn} onPress={() => setShowNewPass((v) => !v)}>
+                    <Ionicons name={showNewPass ? 'eye-off-outline' : 'eye-outline'} size={18} color={C.muted} />
+                  </TouchableOpacity>
+                </View>
+              </View>
+
+              <View style={s.group}>
+                <Text style={s.label}>Confirm New Password</Text>
+                <View style={s.inputWrap}>
+                  <View style={s.inputIconWrap}>
+                    <Ionicons name="lock-closed-outline" size={16} color={C.primary} />
+                  </View>
+                  <TextInput
+                    style={s.input}
+                    placeholder="••••••••"
+                    placeholderTextColor={C.muted}
+                    value={confirmNewPassword}
+                    onChangeText={setConfirmNewPassword}
+                    secureTextEntry={!showNewPass}
+                    autoCapitalize="none"
+                    autoComplete="new-password"
+                  />
+                </View>
+                <Text style={s.hint}>At least 8 characters, with an uppercase letter, a lowercase letter, and a number.</Text>
+              </View>
+
+              <TouchableOpacity style={[s.btn, submitting && s.btnDisabled]} onPress={handleSetNewPassword} disabled={submitting} activeOpacity={0.85}>
+                {submitting
+                  ? <ActivityIndicator color="#fff" size="small" />
+                  : <>
+                      <Ionicons name="checkmark-circle-outline" size={18} color="#fff" />
+                      <Text style={s.btnText}>Update Password</Text>
+                    </>}
+              </TouchableOpacity>
+
+              <TouchableOpacity style={s.resetBackRow} onPress={handleCancelReset} disabled={submitting}>
+                <Text style={s.resetBackText}>Cancel</Text>
+              </TouchableOpacity>
+            </>
+          )}
+
+          {mode !== 'reset' && (
+            <View style={s.registerFooter}>
+              <Text style={s.registerFooterText}>Don't have an account? </Text>
+              <TouchableOpacity onPress={() => router.push('/register' as any)}>
+                <Text style={s.link}>Register your company</Text>
+              </TouchableOpacity>
+            </View>
           )}
 
           {/* Trust badges */}
@@ -427,17 +532,13 @@ const s = StyleSheet.create({
   },
   logoWrap: { alignItems: 'center' },
   logoIcon: {
-    width: 68, height: 68, borderRadius: 22,
-    backgroundColor: C.primary, alignItems: 'center', justifyContent: 'center',
+    width: 68, height: 68,
     shadowColor: C.primary, shadowOpacity: 0.6, shadowRadius: 20, elevation: 12,
     marginBottom: 14,
   },
   logoName: { fontSize: 30, fontWeight: '900', color: '#fff', letterSpacing: -0.5 },
   logoTagline: { fontSize: 13, color: 'rgba(255,255,255,0.4)', marginTop: 4 },
-  loadingLogo: {
-    width: 64, height: 64, borderRadius: 20,
-    backgroundColor: C.primary, alignItems: 'center', justifyContent: 'center',
-  },
+  loadingLogo: { width: 64, height: 64 },
 
   // Form card
   card: {
@@ -499,6 +600,9 @@ const s = StyleSheet.create({
   },
   idTypeBadgeText: { fontSize: 10, fontWeight: '700', color: C.primary },
   hint: { fontSize: 11, color: C.muted, marginTop: 5 },
+  forgotRow: { alignSelf: 'flex-end', marginTop: 8 },
+  resetBackRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, marginTop: 14, marginBottom: 6, paddingVertical: 4 },
+  resetBackText: { fontSize: 13, color: C.muted, fontWeight: '600' },
 
   // Button
   btn: {
@@ -522,17 +626,9 @@ const s = StyleSheet.create({
   },
   otpHeaderTitle: { fontSize: 14, fontWeight: '700', color: C.primary },
   otpHeaderSub: { fontSize: 12, color: C.muted, marginTop: 2 },
-  otpRow: { flexDirection: 'row', gap: 7, justifyContent: 'center', marginBottom: 20 },
-  otpBox: {
-    width: 36, height: 48, borderRadius: 10,
-    borderWidth: 1.5, borderColor: C.border,
-    backgroundColor: '#FAFAFA', alignItems: 'center', justifyContent: 'center',
-  },
-  otpBoxFilled: { borderColor: C.primary, backgroundColor: C.primaryBg },
-  otpBoxActive: { borderColor: C.primary, borderWidth: 2 },
-  otpDigit: { fontSize: 18, fontWeight: '800', color: C.text },
-  otpHidden: { position: 'absolute', opacity: 0, width: 1, height: 1 },
   otpFooter: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 14 },
+  registerFooter: { flexDirection: 'row', justifyContent: 'center', marginTop: 20 },
+  registerFooterText: { fontSize: 13, color: C.muted },
   link: { fontSize: 13, color: C.primary, fontWeight: '600' },
   muted: { fontSize: 13, color: C.muted },
 

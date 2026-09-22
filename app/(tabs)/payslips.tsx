@@ -1,11 +1,13 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useState, useCallback } from 'react';
 import {
-  View, Text, ScrollView, StyleSheet, TouchableOpacity, ActivityIndicator, Share, Animated,
+  View, Text, ScrollView, StyleSheet, TouchableOpacity, ActivityIndicator, Share, Animated, RefreshControl,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '@/context/AuthContext';
+import { useForegroundRefresh } from '@/hooks/useForegroundRefresh';
 import { fetchMyPayslip } from '@/services/payrollService';
+import { showToast } from '@/components/Toast';
 import { fmt, monthLabel } from '@/lib/helpers';
 import { Colors as C } from '@/constants/Colors';
 
@@ -33,19 +35,25 @@ export default function PayslipsScreen() {
   const [year, setYear] = useState(new Date().getFullYear());
   const [slip, setSlip] = useState<any>(null);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [showAmounts, setShowAmounts] = useState(false);
   const revealAnim = React.useRef(new Animated.Value(0)).current;
 
   const fetchData = useCallback(async () => {
     if (!profile || !tenant) return;
-    setLoading(true);
-    const { data } = await fetchMyPayslip(tenant.id, profile.id, month, year);
+    const { data, error } = await fetchMyPayslip(tenant.id, profile.id, month, year);
+    if (error) { showToast('Could not load payslip.', 'error'); return; }
     setSlip(data);
-    setLoading(false);
     setShowAmounts(false);
   }, [profile, tenant, month, year]);
 
-  useEffect(() => { fetchData(); }, [fetchData]);
+  useForegroundRefresh(fetchData, setLoading);
+
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    await fetchData();
+    setRefreshing(false);
+  }, [fetchData]);
 
   const toggleReveal = () => {
     const next = !showAmounts;
@@ -109,7 +117,8 @@ export default function PayslipsScreen() {
       </View>
 
       <ScrollView style={s.scroll} showsVerticalScrollIndicator={false}
-        contentContainerStyle={{ paddingBottom: 28 }}>
+        contentContainerStyle={{ paddingBottom: 140 }}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={C.primary} colors={[C.primary]} />}>
 
         {/* Month selector */}
         <View style={s.monthSelector}>
@@ -161,9 +170,11 @@ export default function PayslipsScreen() {
             {!showAmounts && (
               <View style={s.privacyBanner}>
                 <Ionicons name="lock-closed" size={14} color={C.primary} />
-                <Text style={s.privacyText}>
-                  Salary amounts are hidden. Tap <Text style={{ fontWeight: '700', color: C.primary }}>Reveal</Text> to view.
-                </Text>
+                <View style={s.privacyTextRow}>
+                  <Text style={s.privacyText}>Salary amounts are hidden. Tap </Text>
+                  <Text style={s.privacyEmphasis}>Reveal</Text>
+                  <Text style={s.privacyText}> to view.</Text>
+                </View>
               </View>
             )}
 
@@ -325,7 +336,9 @@ const s = StyleSheet.create({
     backgroundColor: C.primaryBg, borderRadius: 12, padding: 12,
     borderLeftWidth: 3, borderLeftColor: C.primary,
   },
-  privacyText: { flex: 1, fontSize: 12.5, color: C.muted },
+  privacyTextRow: { flex: 1, flexDirection: 'row', flexWrap: 'wrap' },
+  privacyText: { fontSize: 12.5, color: C.muted },
+  privacyEmphasis: { fontSize: 12.5, fontWeight: '700', color: C.primary },
 
   // Slip header card
   slipTopCard: {

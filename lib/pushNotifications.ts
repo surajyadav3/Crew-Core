@@ -4,6 +4,11 @@ import { router } from 'expo-router';
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
     shouldShowAlert: true,
+    // shouldShowBanner/shouldShowList replaced shouldShowAlert in newer
+    // expo-notifications — without them, foreground notifications may not
+    // render as a banner or appear in the OS notification list/center.
+    shouldShowBanner: true,
+    shouldShowList: true,
     shouldPlaySound: true,
     shouldSetBadge: false,
   }),
@@ -43,16 +48,24 @@ export function markNavigationReady() {
 
 // Presents an immediate system notification (Android notification tray / iOS banner),
 // as opposed to an in-app toast or banner. `data.type` drives the tap-to-navigate
-// routing in ROUTE_BY_TYPE above.
+// routing in ROUTE_BY_TYPE above. Callers fire this without awaiting it (same as
+// sendPunchNotification's edge-function call) — swallow failures here so a platform
+// that can't schedule local notifications (web has no OS notification tray, so
+// expo-notifications throws UnavailabilityError there) never surfaces as an
+// unhandled promise rejection that crashes the caller's UI.
 export async function presentLocalNotification(
   title: string,
   body: string,
   data?: Record<string, unknown>
 ) {
-  await Notifications.scheduleNotificationAsync({
-    content: { title, body, data },
-    trigger: null,
-  });
+  try {
+    await Notifications.scheduleNotificationAsync({
+      content: { title, body, data },
+      trigger: null,
+    });
+  } catch (err) {
+    console.error('[CrewCore] presentLocalNotification failed:', err);
+  }
 }
 
 export function initNotificationResponseListener() {

@@ -92,8 +92,8 @@ android {
         applicationId 'com.crewcore.app'
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 29
-        versionName "1.1.3"
+        versionCode 39
+        versionName "1.1.13"
     }
     signingConfigs {
         debug {

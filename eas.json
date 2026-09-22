@@ -21,6 +21,9 @@
       }
     },
     "production": {
+      "ios": {
+        "image": "macos-sequoia-15.6-xcode-26.2"
+      },
       "android": {
         "buildType": "app-bundle",
         "credentialsSource": "local"
@@ -33,6 +36,11 @@
   },
   "submit": {
     "production": {
+      "ios": {
+        "appleId": "motishprakash@gmail.com",
+        "ascAppId": "6805603247",
+        "appleTeamId": "ZYFGHN8G98"
+      },
       "android": {
         "serviceAccountKeyPath": "./google-play-key.json",
         "track": "beta"

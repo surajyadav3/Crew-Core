@@ -1,16 +1,25 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity,
-  Animated, Dimensions, Easing,
+  Animated, Dimensions, Easing, RefreshControl, ActivityIndicator,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
+import { useFocusEffect } from '@react-navigation/native';
 import { useAuth } from '@/context/AuthContext';
+import { useFeatures } from '@/context/FeatureContext';
+import { useClockInOut } from '@/hooks/useClockInOut';
 import { fetchMyMonthAttendance } from '@/services/attendanceService';
+import { listHolidays } from '@/services/holidayService';
 import { listMyNotifications, markNotificationRead } from '@/services/notificationService';
+import { fetchMyAdvanceBalance } from '@/services/advanceService';
+import { showToast } from '@/components/Toast';
+import HolidayBanner from '@/components/HolidayBanner';
+import AnnouncementBanner from '@/components/AnnouncementBanner';
+import { MORE_TOOLS } from '@/constants/MoreTools';
 import {
-  todayStr, dateStr, timeStr, diffHours, fmtDuration, monthLabel, fmtTime12, fmtDate,
+  dateStr, fmtHMS, monthLabel, fmtTime12, fmtDate, fmt,
 } from '@/lib/helpers';
 import { Colors as C } from '@/constants/Colors';
 
@@ -124,73 +133,93 @@ function PulseDot({ color }: { color: string }) {
 // ── Main screen ────────────────────────────────────────────────────────────────
 export default function DashboardScreen() {
   const { profile, tenant } = useAuth();
+  const { isEnabled } = useFeatures();
   const router = useRouter();
+  const clock = useClockInOut();
 
   const [loading, setLoading] = useState(true);
-  const [todayRec, setTodayRec] = useState<any>(null);
+  const [refreshing, setRefreshing] = useState(false);
   const [summary, setSummary] = useState({ present: 0, absent: 0, late: 0, totalHours: 0 });
   const [updates, setUpdates] = useState<any[]>([]);
+  const [advanceBalance, setAdvanceBalance] = useState(0);
   const headerFade = useRef(new Animated.Value(0)).current;
 
   const now = new Date();
 
   const loadData = useCallback(async () => {
     if (!profile || !tenant) return;
-    setLoading(true);
     try {
-      const { data } = await fetchMyMonthAttendance(profile.id, now.getFullYear(), now.getMonth());
-      const today = data.find((r: any) => r.date === todayStr()) || null;
-      setTodayRec(today);
+      const [{ data, error }, { data: holidays, error: holErr }, advRes] = await Promise.all([
+        fetchMyMonthAttendance(profile.id, now.getFullYear(), now.getMonth()),
+        listHolidays(tenant.id),
+        fetchMyAdvanceBalance(profile.id),
+      ]);
+      if (error) { showToast('Could not load attendance summary.', 'error'); return; }
+      if (holErr) showToast('Could not load holidays.', 'error');
+      setAdvanceBalance(advRes.total || 0);
 
       let present = 0, absent = 0, late = 0, totalHours = 0;
       for (let d = 1; d <= new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate(); d++) {
         const date = new Date(now.getFullYear(), now.getMonth(), d);
         if (date > now || date.getDay() === 0 || date.getDay() === 6) continue;
-        const rec = data.find((r: any) => r.date === dateStr(date));
+        const ds = dateStr(date);
+        if ((holidays || []).find((h: any) => h.date === ds && h.status === 'Approved')) continue;
+        const rec = data.find((r: any) => r.date === ds);
         if (!rec) { if (date < now) absent++; continue; }
         if (rec.status === 'Present') present++;
         else if (rec.status === 'Late') { present++; late++; }
         else if (rec.status === 'Absent') absent++;
-        totalHours += rec.total_hours || 0;
+        // Today's total_hours only gets (re)written on clock-out, so while
+        // still clocked in it excludes whatever's been worked so far — skip
+        // it here and let the render below add today's live-ticking total
+        // instead, so the month total doesn't look frozen mid-shift.
+        if (d !== now.getDate()) totalHours += rec.total_hours || 0;
       }
       setSummary({ present, absent, late, totalHours });
-    } finally {
-      setLoading(false);
+    } catch (err) {
+      console.error('[CrewCore] Dashboard loadData error:', err);
+      showToast('Could not load attendance summary.', 'error');
     }
   }, [profile, tenant]);
 
   const loadUpdates = useCallback(async () => {
     if (!profile) return;
-    const { data } = await listMyNotifications(profile.id);
+    const { data, error } = await listMyNotifications(profile.id);
+    if (error) { showToast('Could not load announcements.', 'error'); return; }
     setUpdates(data.slice(0, 5));
   }, [profile]);
 
-  useEffect(() => { loadData(); }, [loadData]);
-  useEffect(() => { loadUpdates(); }, [loadUpdates]);
+  const loadAll = useCallback(async () => {
+    setLoading(true);
+    await Promise.all([loadData(), loadUpdates(), clock.refresh()]);
+    setLoading(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loadData, loadUpdates]);
+
+  useFocusEffect(useCallback(() => { loadAll(); }, [loadAll]));
+
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    await Promise.all([loadData(), loadUpdates(), clock.refresh()]);
+    setRefreshing(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loadData, loadUpdates]);
 
   const handleOpenUpdate = async (n: any) => {
-    if (n.read) return;
-    await markNotificationRead(n.id);
-    setUpdates((prev) => prev.map((x) => (x.id === n.id ? { ...x, read: true } : x)));
+    if (n.is_read) return;
+    const { error } = await markNotificationRead(n.id);
+    if (error) return;
+    setUpdates((prev) => prev.map((x) => (x.id === n.id ? { ...x, is_read: true } : x)));
   };
 
   useEffect(() => {
     Animated.timing(headerFade, { toValue: 1, duration: 600, useNativeDriver: true }).start();
   }, []);
 
-  const punches = todayRec?.punches || [];
+  const punches = clock.myPunches?.punches || [];
   const sortedPunches = [...punches].sort((a: any, b: any) => a.punch_time.localeCompare(b.punch_time));
-  const ins = sortedPunches.filter((p: any) => p.punch_type === 'in');
-  const outs = sortedPunches.filter((p: any) => p.punch_type === 'out');
-  const isClockedIn = ins.length > outs.length;
+  const isClockedIn = clock.isClockedIn;
   const hasPunches = punches.length > 0;
-
-  let workedSecs = 0;
-  for (let i = 0; i < ins.length; i++) {
-    const outT = outs[i]?.punch_time || timeStr(new Date());
-    workedSecs += diffHours(ins[i].punch_time, outT) * 3600;
-  }
-  const workedDisplay = workedSecs > 0 ? fmtDuration(workedSecs / 3600) : null;
 
   const lastPunch = sortedPunches[sortedPunches.length - 1];
   const statusLabel = isClockedIn ? 'Currently Working' : hasPunches ? 'Clocked Out' : 'Not Clocked In';
@@ -199,14 +228,22 @@ export default function DashboardScreen() {
 
   const dateLabel = now.toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long' });
 
+  const performanceEnabled = isEnabled('performance_kras') || isEnabled('performance_feedback')
+    || isEnabled('performance_pip') || isEnabled('performance_reviews');
+
   const QUICK_ACTIONS = [
-    { label: 'Clock In / Out', icon: 'finger-print' as const, color: C.primary, bg: C.primaryBg, route: '/attendance' },
-    { label: 'Request Leave', icon: 'calendar-outline' as const, color: C.teal, bg: C.tealBg, route: '/leaves' },
-    { label: 'Special Request', icon: 'flash-outline' as const, color: C.amber, bg: C.amberBg, route: '/requests' },
-    { label: 'Regularize', icon: 'calendar-number-outline' as const, color: C.rose, bg: C.roseBg, route: '/requests' },
-    { label: 'My Payslips', icon: 'document-text-outline' as const, color: C.success, bg: C.successBg, route: '/payslips' },
-    { label: 'My Profile', icon: 'person-circle-outline' as const, color: C.primaryDark, bg: '#DDD6FE', route: '/profile' },
-  ];
+    { label: 'Clock In / Out', icon: 'finger-print' as const, color: C.primary, bg: C.primaryBg, route: '/attendance', featureKey: 'attendance' },
+    { label: 'Request Leave', icon: 'calendar-outline' as const, color: C.teal, bg: C.tealBg, route: '/leaves', featureKey: 'leave_requests' },
+    { label: 'Special Request', icon: 'flash-outline' as const, color: C.amber, bg: C.amberBg, route: '/requests', featureKey: 'special_requests' },
+    { label: 'Regularize', icon: 'calendar-number-outline' as const, color: C.rose, bg: C.roseBg, route: '/requests', featureKey: 'regularize_attendance' },
+    ...(performanceEnabled ? [{ label: 'Performance', icon: 'ribbon-outline' as const, color: C.primaryDark, bg: '#DDD6FE', route: '/performance', featureKey: null }] : []),
+    { label: 'My Payslips', icon: 'document-text-outline' as const, color: C.success, bg: C.successBg, route: '/payslips', featureKey: 'payslips' },
+    { label: 'My Profile', icon: 'person-circle-outline' as const, color: C.primaryDark, bg: '#DDD6FE', route: '/profile', featureKey: null },
+    { label: 'More Tools', icon: 'apps-outline' as const, color: C.purple, bg: '#EDE9FE', route: '/more', featureKey: null },
+  ].filter((a) => isEnabled(a.featureKey));
+
+  const visibleTools = MORE_TOOLS.filter((t) => isEnabled(t.featureKey));
+  const showAdvanceCard = isEnabled('advances_loans');
 
   const initials = [profile?.first_name?.[0], profile?.last_name?.[0]].filter(Boolean).join('').toUpperCase() || '?';
 
@@ -215,7 +252,8 @@ export default function DashboardScreen() {
       <ScrollView
         style={s.scroll}
         showsVerticalScrollIndicator={false}
-        contentContainerStyle={{ paddingBottom: 32 }}
+        contentContainerStyle={{ paddingBottom: 140 }}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={C.primary} colors={[C.primary]} />}
       >
         {/* ── Hero Header ──────────────────────────────────────────────── */}
         <Animated.View style={[s.hero, { opacity: headerFade }]}>
@@ -266,13 +304,20 @@ export default function DashboardScreen() {
                       <PulseDot color={statusColor} />
                       <Text style={[s.statusLabel, { color: statusColor }]}>{statusLabel}</Text>
                     </View>
-                    {workedDisplay && (
+                    {isClockedIn && (
                       <View style={s.workedPill}>
                         <Ionicons name="time-outline" size={12} color={C.primary} />
-                        <Text style={s.workedText}>{workedDisplay}</Text>
+                        <Text style={s.workedText}>{clock.timerDisplay}</Text>
                       </View>
                     )}
                   </View>
+
+                  {isClockedIn && (
+                    <View style={s.liveClockRow}>
+                      <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: C.success }} />
+                      <Text style={s.liveClockText}>{clock.liveClock}</Text>
+                    </View>
+                  )}
 
                   {lastPunch && (
                     <View style={s.lastPunchRow}>
@@ -288,19 +333,47 @@ export default function DashboardScreen() {
                       <Text style={s.lastPunchText}>You haven't clocked in today yet.</Text>
                     </View>
                   )}
+                  <View style={s.locationRow}>
+                    <Ionicons name="location-outline" size={11} color={C.muted} />
+                    <Text style={s.locationRowText} numberOfLines={1}>{clock.locationStatus}</Text>
+                  </View>
+
+                  <View style={s.clockActionRow}>
+                    <TouchableOpacity
+                      style={[s.clockActionBtn, s.clockInBtn, (isClockedIn || clock.actionLoading) && s.btnDisabled]}
+                      onPress={clock.handleClockIn}
+                      disabled={isClockedIn || clock.actionLoading}
+                      activeOpacity={0.85}
+                    >
+                      {clock.actionLoading && !isClockedIn
+                        ? <ActivityIndicator color={C.success} size="small" />
+                        : <>
+                            <Ionicons name="log-in-outline" size={17} color={C.success} />
+                            <Text style={[s.clockActionText, { color: C.success }]}>Clock In</Text>
+                          </>}
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={[s.clockActionBtn, s.clockOutBtn, (!isClockedIn || clock.actionLoading) && s.btnDisabled]}
+                      onPress={clock.handleClockOut}
+                      disabled={!isClockedIn || clock.actionLoading}
+                      activeOpacity={0.85}
+                    >
+                      {clock.actionLoading && isClockedIn
+                        ? <ActivityIndicator color={C.danger} size="small" />
+                        : <>
+                            <Ionicons name="log-out-outline" size={17} color={C.danger} />
+                            <Text style={[s.clockActionText, { color: C.danger }]}>Clock Out</Text>
+                          </>}
+                    </TouchableOpacity>
+                  </View>
 
                   <TouchableOpacity
-                    style={s.attendanceBtn}
+                    style={s.viewAttendanceLink}
                     onPress={() => router.push('/attendance' as any)}
-                    activeOpacity={0.85}
+                    activeOpacity={0.7}
                   >
-                    <Ionicons name="finger-print" size={18} color="#fff" />
-                    <Text style={s.attendanceBtnText}>
-                      {isClockedIn ? 'Clock Out / View Attendance' : 'Go to Attendance'}
-                    </Text>
-                    <View style={s.btnArrow}>
-                      <Ionicons name="arrow-forward" size={14} color={C.primary} />
-                    </View>
+                    <Text style={s.viewAttendanceLinkText}>View full attendance & calendar</Text>
+                    <Ionicons name="chevron-forward" size={13} color={C.primary} />
                   </TouchableOpacity>
                 </View>
               </View>
@@ -314,17 +387,19 @@ export default function DashboardScreen() {
                   { val: summary.present, label: 'Present', color: C.success, bg: C.successBg, icon: 'checkmark-circle' as const },
                   { val: summary.absent, label: 'Absent', color: C.danger, bg: C.dangerBg, icon: 'close-circle' as const },
                   { val: summary.late, label: 'Late', color: C.warning, bg: C.warningBg, icon: 'alert-circle' as const },
-                  { val: fmtDuration(summary.totalHours), label: 'Hours', color: C.primary, bg: C.primaryBg, icon: 'timer-outline' as const },
+                  { val: fmtHMS(summary.totalHours * 3600 + clock.timerSeconds), label: 'Hours', color: C.primary, bg: C.primaryBg, icon: 'timer-outline' as const },
                 ].map((item) => (
                   <TouchableOpacity
                     key={item.label}
-                    style={[s.summaryCard, { backgroundColor: item.bg }]}
+                    style={s.summaryCard}
                     onPress={() => router.push('/attendance' as any)}
                     activeOpacity={0.75}
                   >
-                    <Ionicons name={item.icon} size={18} color={item.color} />
-                    <Text style={[s.summaryVal, { color: item.color }]}>{item.val}</Text>
-                    <Text style={[s.summaryLbl, { color: item.color + 'AA' }]}>{item.label}</Text>
+                    <View style={[s.summaryIconWrap, { backgroundColor: item.bg }]}>
+                      <Ionicons name={item.icon} size={16} color={item.color} />
+                    </View>
+                    <Text style={s.summaryVal}>{item.val}</Text>
+                    <Text style={s.summaryLbl}>{item.label}</Text>
                   </TouchableOpacity>
                 ))}
               </View>
@@ -332,47 +407,8 @@ export default function DashboardScreen() {
           </>
         )}
 
-        {/* ── Announcements & Updates ──────────────────────────────────── */}
-        <AnimatedCard delay={250}>
-          <View style={s.sectionHeaderRow}>
-            <Text style={[s.sectionLabel, { marginTop: 0, paddingHorizontal: 0 }]}>Announcements & Updates</Text>
-            {updates.length > 0 && (
-              <TouchableOpacity onPress={() => router.push('/notices' as any)} activeOpacity={0.7}>
-                <Text style={s.seeAllText}>See all</Text>
-              </TouchableOpacity>
-            )}
-          </View>
-          {updates.length === 0 ? (
-            <View style={s.updatesEmpty}>
-              <Ionicons name="notifications-outline" size={22} color={C.muted} />
-              <Text style={s.updatesEmptyText}>You're all caught up. New policies, announcements and approvals will show up here.</Text>
-            </View>
-          ) : (
-            <View style={s.updatesList}>
-              {updates.map((n) => (
-                <TouchableOpacity
-                  key={n.id}
-                  style={[s.updateCard, !n.read && s.updateCardUnread]}
-                  onPress={() => handleOpenUpdate(n)}
-                  activeOpacity={0.85}
-                >
-                  <View style={[s.updateIconWrap, !n.read && { backgroundColor: C.primaryBg }]}>
-                    <Ionicons name={UPDATE_ICON[n.type] || 'notifications-outline'} size={17} color={C.primary} />
-                  </View>
-                  <View style={{ flex: 1 }}>
-                    <Text style={s.updateTitle} numberOfLines={1}>{n.title}</Text>
-                    {!!n.body && <Text style={s.updateBody} numberOfLines={2}>{n.body}</Text>}
-                    <Text style={s.updateTime}>{fmtDate(n.created_at)}</Text>
-                  </View>
-                  {!n.read && <View style={s.updateDot} />}
-                </TouchableOpacity>
-              ))}
-            </View>
-          )}
-        </AnimatedCard>
-
         {/* ── Quick Actions ─────────────────────────────────────────────── */}
-        <AnimatedCard delay={300}>
+        <AnimatedCard delay={250}>
           <Text style={s.sectionLabel}>Quick Actions</Text>
           <View style={s.actionsGrid}>
             {QUICK_ACTIONS.map((item, idx) => (
@@ -392,6 +428,94 @@ export default function DashboardScreen() {
               </TouchableOpacity>
             ))}
           </View>
+        </AnimatedCard>
+
+        {/* ── Announcements banner ────────────────────────────────────── */}
+        <AnnouncementBanner />
+
+        {/* ── Announcements & Updates ──────────────────────────────────── */}
+        <AnimatedCard delay={300}>
+          <View style={s.sectionHeaderRow}>
+            <Text style={[s.sectionLabel, { marginTop: 0, paddingHorizontal: 0 }]}>Announcements & Updates</Text>
+            {updates.length > 0 && (
+              <TouchableOpacity onPress={() => router.push('/notices' as any)} activeOpacity={0.7}>
+                <Text style={s.seeAllText}>See all</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+          {updates.length === 0 ? (
+            <View style={s.updatesEmpty}>
+              <Ionicons name="notifications-outline" size={22} color={C.muted} />
+              <Text style={s.updatesEmptyText}>You're all caught up. New policies, announcements and approvals will show up here.</Text>
+            </View>
+          ) : (
+            <View style={s.updatesList}>
+              {updates.map((n) => (
+                <TouchableOpacity
+                  key={n.id}
+                  style={[s.updateCard, !n.is_read && s.updateCardUnread]}
+                  onPress={() => handleOpenUpdate(n)}
+                  activeOpacity={0.85}
+                >
+                  <View style={[s.updateIconWrap, !n.is_read && { backgroundColor: C.primaryBg }]}>
+                    <Ionicons name={UPDATE_ICON[n.type] || 'notifications-outline'} size={17} color={C.primary} />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={s.updateTitle} numberOfLines={1}>{n.title}</Text>
+                    {!!n.body && <Text style={s.updateBody} numberOfLines={2}>{n.body}</Text>}
+                    <Text style={s.updateTime}>{fmtDate(n.created_at)}</Text>
+                  </View>
+                  {!n.is_read && <View style={s.updateDot} />}
+                </TouchableOpacity>
+              ))}
+            </View>
+          )}
+        </AnimatedCard>
+
+        {/* ── Holidays (lower priority — informational, not actionable) ──── */}
+        <HolidayBanner />
+
+        {/* ── More Tools ───────────────────────────────────────────────── */}
+        <AnimatedCard delay={350}>
+            <View style={s.sectionHeaderRow}>
+              <Text style={[s.sectionLabel, { marginTop: 0, paddingHorizontal: 0 }]}>More Tools</Text>
+              <TouchableOpacity onPress={() => router.push('/more' as any)} activeOpacity={0.7}>
+                <Text style={s.seeAllText}>See all</Text>
+              </TouchableOpacity>
+            </View>
+
+            <View style={s.moreStatsRow}>
+              {showAdvanceCard && (
+                <View style={s.moreStatCard}>
+                  <View style={[s.moreStatIconWrap, { backgroundColor: C.dangerBg }]}>
+                    <Ionicons name="wallet-outline" size={16} color={C.danger} />
+                  </View>
+                  <Text style={s.moreStatLabel}>Advance Balance</Text>
+                  <Text style={s.moreStatVal}>{fmt(advanceBalance)}</Text>
+                </View>
+              )}
+              <TouchableOpacity style={s.moreStatCard} onPress={() => router.push('/more' as any)} activeOpacity={0.85}>
+                <View style={[s.moreStatIconWrap, { backgroundColor: C.tealBg }]}>
+                  <Ionicons name="swap-horizontal-outline" size={16} color={C.teal} />
+                </View>
+                <Text style={s.moreStatLabel}>Comp-Off Balance</Text>
+                <Text style={s.moreStatVal}>{profile?.comp_off_balance || 0}</Text>
+              </TouchableOpacity>
+            </View>
+
+            {visibleTools.length > 0 && (
+              <View style={s.moreToolsGrid}>
+                {visibleTools.map((t) => (
+                  <TouchableOpacity key={t.route} style={s.moreToolCard} onPress={() => router.push(t.route as any)} activeOpacity={0.85}>
+                    <View style={[s.moreToolIconWrap, { backgroundColor: t.bg }]}>
+                      <Ionicons name={t.icon} size={20} color={t.color} />
+                    </View>
+                    <Text style={s.moreToolLabel}>{t.label}</Text>
+                    <Text style={s.moreToolDesc} numberOfLines={2}>{t.desc}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            )}
         </AnimatedCard>
 
       </ScrollView>
@@ -472,21 +596,32 @@ const s = StyleSheet.create({
     backgroundColor: C.primaryBg, paddingHorizontal: 10, paddingVertical: 5, borderRadius: 12,
   },
   workedText: { fontSize: 12, fontWeight: '700', color: C.primary },
+  liveClockRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    paddingHorizontal: 16, paddingBottom: 8,
+  },
+  liveClockText: { fontSize: 12.5, fontWeight: '600', color: C.muted, fontVariant: ['tabular-nums'] },
   lastPunchRow: {
     flexDirection: 'row', alignItems: 'center', gap: 6,
     paddingHorizontal: 16, paddingBottom: 10,
   },
   lastPunchText: { fontSize: 12.5, color: C.muted },
-  attendanceBtn: {
-    flexDirection: 'row', alignItems: 'center', gap: 8,
-    backgroundColor: C.dark, borderRadius: 14,
-    paddingVertical: 13, paddingHorizontal: 16, margin: 12, marginTop: 4,
+  locationRow: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 16, paddingBottom: 8 },
+  locationRowText: { fontSize: 11, color: C.muted, flexShrink: 1 },
+  clockActionRow: { flexDirection: 'row', gap: 8, paddingHorizontal: 12, marginTop: 2 },
+  clockActionBtn: {
+    flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    borderRadius: 14, paddingVertical: 12, gap: 7, borderWidth: 1,
   },
-  attendanceBtnText: { flex: 1, fontSize: 14, fontWeight: '700', color: '#fff' },
-  btnArrow: {
-    width: 26, height: 26, borderRadius: 13, backgroundColor: 'rgba(255,255,255,0.1)',
-    alignItems: 'center', justifyContent: 'center',
+  clockInBtn: { backgroundColor: C.successBg, borderColor: 'rgba(16,185,129,0.3)' },
+  clockOutBtn: { backgroundColor: C.dangerBg, borderColor: 'rgba(239,68,68,0.25)' },
+  clockActionText: { fontSize: 13.5, fontWeight: '800' },
+  btnDisabled: { opacity: 0.35 },
+  viewAttendanceLink: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4,
+    paddingVertical: 12, marginHorizontal: 12, marginTop: 4, marginBottom: 4,
   },
+  viewAttendanceLinkText: { fontSize: 12.5, fontWeight: '700', color: C.primary },
 
   // Section label
   sectionLabel: {
@@ -498,12 +633,17 @@ const s = StyleSheet.create({
   // Summary
   summaryRow: { flexDirection: 'row', gap: 8, paddingHorizontal: 16 },
   summaryCard: {
-    flex: 1, borderRadius: 16, paddingVertical: 14, paddingHorizontal: 6,
-    alignItems: 'center', gap: 4,
+    flex: 1, backgroundColor: C.surface, borderRadius: 16, paddingVertical: 14, paddingHorizontal: 6,
+    alignItems: 'center', gap: 6,
+    borderWidth: 1, borderColor: C.border,
     shadowColor: '#000', shadowOpacity: 0.04, shadowRadius: 6, elevation: 2,
   },
-  summaryVal: { fontSize: 18, fontWeight: '900' },
-  summaryLbl: { fontSize: 9.5, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.3 },
+  summaryIconWrap: {
+    width: 30, height: 30, borderRadius: 10,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  summaryVal: { fontSize: 17, fontWeight: '900', color: C.text },
+  summaryLbl: { fontSize: 9.5, fontWeight: '700', color: C.muted, textTransform: 'uppercase', letterSpacing: 0.3 },
 
   // Announcements & Updates
   sectionHeaderRow: {
@@ -557,4 +697,32 @@ const s = StyleSheet.create({
   actionArrow: {
     position: 'absolute', top: 10, right: 10,
   },
+
+  // More Tools
+  moreStatsRow: { flexDirection: 'row', gap: 10, paddingHorizontal: 16, marginBottom: 12 },
+  moreStatCard: {
+    flex: 1, backgroundColor: C.bg, borderRadius: 16, padding: 12, gap: 3,
+  },
+  moreStatIconWrap: {
+    width: 30, height: 30, borderRadius: 10,
+    alignItems: 'center', justifyContent: 'center', marginBottom: 2,
+  },
+  moreStatLabel: { fontSize: 11, color: C.muted, fontWeight: '600' },
+  moreStatVal: { fontSize: 15, fontWeight: '800', color: C.text },
+  moreToolsGrid: {
+    flexDirection: 'row', flexWrap: 'wrap',
+    paddingHorizontal: 16, gap: 10,
+  },
+  moreToolCard: {
+    width: '47%',
+    backgroundColor: C.surface, borderRadius: 16,
+    padding: 12, gap: 3,
+    borderWidth: 1, borderColor: C.border,
+  },
+  moreToolIconWrap: {
+    width: 36, height: 36, borderRadius: 12,
+    alignItems: 'center', justifyContent: 'center', marginBottom: 4,
+  },
+  moreToolLabel: { fontSize: 13, fontWeight: '700', color: C.text },
+  moreToolDesc: { fontSize: 11, color: C.muted, lineHeight: 14 },
 });

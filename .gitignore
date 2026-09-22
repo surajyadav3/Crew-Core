@@ -10,6 +10,7 @@ yarn-error.*
 build-output/
 hs_err_pid*.log
 replay_pid*.log
+*.log
 eas_*.txt
 supabase/.temp/
 android/.kotlin/

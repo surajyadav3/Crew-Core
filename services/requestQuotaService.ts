@@ -40,21 +40,27 @@ export function determineApproverRole(quota: any): 'self' | 'manager' | 'admin' 
   return 'admin';
 }
 
+// Routed through the increment_request_quota RPC (SECURITY DEFINER) rather than a
+// direct client-side read-then-write: RLS now only allows admin/manager to UPDATE
+// request_quotas rows directly, so a plain employee's own update here would be
+// rejected outright — and even before that policy tightened, read-then-write from
+// two concurrent submissions could lose an increment. The RPC is atomic and is the
+// only way an employee can bump their own count.
 export async function incrementSelfCount(tenantId: string, profileId: string) {
-  const quota = await getOrCreateQuota(tenantId, profileId);
-  const { error } = await supabase
-    .from('request_quotas')
-    .update({ self_approved_count: quota.self_approved_count + 1, updated_at: new Date().toISOString() })
-    .eq('id', quota.id);
+  const { error } = await supabase.rpc('increment_request_quota', {
+    p_tenant_id: tenantId,
+    p_profile_id: profileId,
+    p_field: 'self_approved_count',
+  });
   if (error) throw error;
 }
 
 export async function incrementManagerCount(tenantId: string, profileId: string) {
-  const quota = await getOrCreateQuota(tenantId, profileId);
-  const { error } = await supabase
-    .from('request_quotas')
-    .update({ manager_approved_count: quota.manager_approved_count + 1, updated_at: new Date().toISOString() })
-    .eq('id', quota.id);
+  const { error } = await supabase.rpc('increment_request_quota', {
+    p_tenant_id: tenantId,
+    p_profile_id: profileId,
+    p_field: 'manager_approved_count',
+  });
   if (error) throw error;
 }
 

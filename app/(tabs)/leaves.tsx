@@ -1,16 +1,73 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity, Modal,
-  TextInput, ActivityIndicator, KeyboardAvoidingView, Platform, Animated,
+  TextInput, ActivityIndicator, KeyboardAvoidingView, Platform, Animated, RefreshControl,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '@/context/AuthContext';
+import { useForegroundRefresh } from '@/hooks/useForegroundRefresh';
 import { listMyLeaveRequests, requestLeave, checkProbationStatus } from '@/services/leaveService';
 import { fetchMyQuota } from '@/services/requestQuotaService';
+import { fetchMyLeaveBalances } from '@/services/leaveLedgerService';
 import { showToast } from '@/components/Toast';
-import { fmtDate, todayStr, HIGH_SALARY_THRESHOLD } from '@/lib/helpers';
+import { fmtDate, todayStr, HIGH_SALARY_THRESHOLD, isRaniwalaTenant } from '@/lib/helpers';
 import { Colors as C } from '@/constants/Colors';
+
+type LeaveBalance = {
+  leave_type_id: string;
+  allocated: number;
+  used: number;
+  balance: number;
+  leave_type?: { name: string; is_unlimited: boolean };
+};
+
+function LeaveBalanceRow({ balances }: { balances: LeaveBalance[] }) {
+  if (!balances.length) return null;
+  return (
+    <View style={lb.wrap}>
+      {balances.map((b) => (
+        <View key={b.leave_type_id} style={lb.item}>
+          <Text style={lb.count}>{b.leave_type?.is_unlimited ? '∞' : b.balance}</Text>
+          <Text style={lb.label} numberOfLines={1}>{b.leave_type?.name || 'Leave'}</Text>
+        </View>
+      ))}
+    </View>
+  );
+}
+
+const lb = StyleSheet.create({
+  wrap: {
+    flexDirection: 'row', flexWrap: 'wrap', gap: 10,
+    marginHorizontal: 16, marginBottom: 10,
+  },
+  item: {
+    flexGrow: 1, minWidth: 78, alignItems: 'center',
+    backgroundColor: C.surface, borderRadius: 14, paddingVertical: 10,
+    shadowColor: '#000', shadowOpacity: 0.05, shadowRadius: 8, elevation: 2,
+  },
+  count: { fontSize: 18, fontWeight: '800', color: C.primary },
+  label: { fontSize: 10.5, color: C.muted, marginTop: 2, textAlign: 'center', paddingHorizontal: 4 },
+});
+
+// Small pill for a Raniwala dual-approval row's manager/HR sub-status —
+// mirrors stagePill from src/pages/dashboard/LeavesPage.jsx.
+function stagePill(label: string, value: string | null | undefined) {
+  if (!value || value === 'Not Required') return null;
+  const sty = value === 'Approved' ? { bg: C.successBg, color: C.success }
+    : value === 'Rejected' ? { bg: C.dangerBg, color: C.danger }
+    : { bg: C.warningBg, color: C.warning };
+  return (
+    <View key={label} style={[stg.pill, { backgroundColor: sty.bg }]}>
+      <Text style={[stg.text, { color: sty.color }]}>{label}: {value}</Text>
+    </View>
+  );
+}
+
+const stg = StyleSheet.create({
+  pill: { borderRadius: 8, paddingHorizontal: 7, paddingVertical: 2, marginRight: 6, marginTop: 4 },
+  text: { fontSize: 9.5, fontWeight: '700' },
+});
 
 type Quota = { selfUsed: number; selfLimit: number; managerUsed: number; managerLimit: number };
 
@@ -63,6 +120,8 @@ const STATUS_STYLE: Record<string, { bg: string; color: string }> = {
   Pending: { bg: C.warningBg, color: C.warning },
 };
 
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
 const EMPTY_FORM = {
   leave_type: 'Casual Leave',
   start_date: todayStr(),
@@ -94,13 +153,16 @@ export default function LeavesScreen() {
   const { profile, tenant } = useAuth();
   const [requests, setRequests] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [showModal, setShowModal] = useState(false);
   const [form, setForm] = useState({ ...EMPTY_FORM });
   const [saving, setSaving] = useState(false);
   const [showTypePicker, setShowTypePicker] = useState(false);
   const [quota, setQuota] = useState<Quota | null>(null);
+  const [balances, setBalances] = useState<LeaveBalance[]>([]);
   const [probation, setProbation] = useState<{ inProbation: boolean; endsOn: string | null; earnedLeaves: number } | null>(null);
 
+  const raniwala = isRaniwalaTenant(tenant);
   const hasCompOff = (profile?.ctc || 0) >= HIGH_SALARY_THRESHOLD && (profile?.comp_off_balance || 0) > 0;
   const leaveTypes = probation?.inProbation
     ? ['Earned (Probation)']
@@ -108,24 +170,36 @@ export default function LeavesScreen() {
 
   const fetchRequests = useCallback(async () => {
     if (!profile) return;
-    setLoading(true);
-    const [reqRes, probRes, quotaRes] = await Promise.all([
+    const [reqRes, probRes, quotaRes, balRes] = await Promise.all([
       listMyLeaveRequests(profile.id),
       checkProbationStatus(profile.id),
       tenant ? fetchMyQuota(tenant.id, profile.id) : null,
+      fetchMyLeaveBalances(profile.id),
     ]);
     if (reqRes.error) showToast(reqRes.error.message, 'error');
     else setRequests(reqRes.data);
     setProbation(probRes);
     if (quotaRes) setQuota(quotaRes);
-    setLoading(false);
+    if (!balRes.error) setBalances(balRes.data as LeaveBalance[]);
   }, [profile, tenant]);
 
-  useEffect(() => { fetchRequests(); }, [fetchRequests]);
+  useForegroundRefresh(fetchRequests, setLoading);
+
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    await fetchRequests();
+    setRefreshing(false);
+  }, [fetchRequests]);
 
   const handleSubmit = async () => {
     if (!form.reason.trim()) { showToast('Please provide a reason.', 'error'); return; }
     if (!form.start_date || !form.end_date) { showToast('Please select both dates.', 'error'); return; }
+    if (!DATE_RE.test(form.start_date) || !DATE_RE.test(form.end_date)) {
+      showToast('Dates must be in YYYY-MM-DD format.', 'error'); return;
+    }
+    if (isNaN(new Date(form.start_date).getTime()) || isNaN(new Date(form.end_date).getTime())) {
+      showToast('Please enter valid calendar dates.', 'error'); return;
+    }
     if (form.end_date < form.start_date) { showToast('End date cannot be before start date.', 'error'); return; }
     if (!tenant) { showToast('You do not belong to any workspace.', 'error'); return; }
     if (probation?.inProbation && form.leave_type !== 'Earned (Probation)') {
@@ -139,11 +213,14 @@ export default function LeavesScreen() {
     setSaving(true);
     try {
       const payload = { ...form, profile_id: profile!.id, tenant_id: tenant.id, status: 'Pending' };
+      const days = daysBetween(form.start_date, form.end_date);
       const { error, tier } = await requestLeave(payload);
       if (error) {
         showToast(error.message || 'Failed to submit leave request.', 'error');
       } else {
-        const msg = tier === 'self' ? 'Auto-approved!' : tier === 'manager' ? 'Sent to Manager for approval.' : 'Submitted for HR approval.';
+        const msg = raniwala
+          ? (days > 3 ? 'Sent to your manager, then HR, for approval.' : 'Sent to your manager for approval.')
+          : tier === 'self' ? 'Auto-approved!' : tier === 'manager' ? 'Sent to Manager for approval.' : 'Submitted for HR approval.';
         showToast(msg, tier === 'self' ? 'success' : 'info');
         setShowModal(false);
         setForm({ ...EMPTY_FORM });
@@ -193,10 +270,15 @@ export default function LeavesScreen() {
           </Text>
         </View>
       )}
-      {quota && <QuotaBanner quota={quota} />}
+      {/* Raniwala leave requests route to the reporting manager (then HR for
+          >3 days), never auto-approve — this quota banner would be
+          misleading there. */}
+      {quota && !raniwala && <QuotaBanner quota={quota} />}
+      <LeaveBalanceRow balances={balances} />
 
       <ScrollView style={s.scroll} showsVerticalScrollIndicator={false}
-        contentContainerStyle={{ paddingBottom: 28 }}>
+        contentContainerStyle={{ paddingBottom: 140 }}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={C.primary} colors={[C.primary]} />}>
         {loading ? (
           <View style={s.loadingBox}><ActivityIndicator color={C.primary} size="large" /></View>
         ) : requests.length === 0 ? (
@@ -237,6 +319,12 @@ export default function LeavesScreen() {
                         <Text style={s.daysText}>{days}d</Text>
                       </View>
                     </View>
+                    {raniwala && req.manager_status != null && (
+                      <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}>
+                        {stagePill('Mgr', req.manager_status)}
+                        {req.requires_hr_approval && stagePill('HR', req.hr_status)}
+                      </View>
+                    )}
                     {!!req.reason && <Text style={s.reasonText} numberOfLines={2}>{req.reason}</Text>}
                     <Text style={s.appliedAt}>Applied {fmtDate(req.created_at)}</Text>
                   </View>
@@ -248,7 +336,7 @@ export default function LeavesScreen() {
       </ScrollView>
 
       {/* Request Leave Modal */}
-      <Modal visible={showModal} animationType="slide" transparent>
+      <Modal visible={showModal && !showTypePicker} animationType="slide" transparent>
         <KeyboardAvoidingView
           style={s.modalOverlay}
           behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
