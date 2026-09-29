@@ -3,6 +3,7 @@ import { useEffect, useRef } from 'react';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '@/context/AuthContext';
 import { useFeatures } from '@/context/FeatureContext';
+import ConnectingScreen from '@/components/ConnectingScreen';
 import { View, Text, Image, Animated, StyleSheet, Platform, TouchableOpacity } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -87,7 +88,7 @@ function LoadingDot({ delay }: { delay: number }) {
 }
 
 export default function TabLayout() {
-  const { user, profile, loading } = useAuth();
+  const { user, profile, loading, profileStatus } = useAuth();
   const { isEnabled } = useFeatures();
   const router = useRouter();
   const { bottom } = useSafeAreaInsets();
@@ -106,10 +107,11 @@ export default function TabLayout() {
   useEffect(() => {
     if (loading) return;
     if (!user) router.replace('/login' as any);
-    else if (!profile) router.replace('/register' as any);
-  }, [user, profile, loading]);
+    else if (!profile && profileStatus === 'missing') router.replace('/register' as any);
+  }, [user, profile, loading, profileStatus]);
 
   if (loading) return <BrandedLoader />;
+  if (user && !profile) return profileStatus === 'missing' ? <BrandedLoader /> : <ConnectingScreen />;
 
   return (
     <Tabs

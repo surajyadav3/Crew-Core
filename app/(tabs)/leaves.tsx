@@ -9,8 +9,9 @@ import { useAuth } from '@/context/AuthContext';
 import { useForegroundRefresh } from '@/hooks/useForegroundRefresh';
 import { listMyLeaveRequests, requestLeave, checkProbationStatus } from '@/services/leaveService';
 import { fetchMyQuota } from '@/services/requestQuotaService';
-import { fetchMyLeaveBalances } from '@/services/leaveLedgerService';
+import { fetchMyLeaveBalances, listLeaveTypes } from '@/services/leaveLedgerService';
 import { showToast } from '@/components/Toast';
+import LeaveBalanceCard, { pickEarnedBalance } from '@/components/LeaveBalanceCard';
 import { fmtDate, todayStr, HIGH_SALARY_THRESHOLD, isRaniwalaTenant } from '@/lib/helpers';
 import { Colors as C } from '@/constants/Colors';
 
@@ -19,19 +20,44 @@ type LeaveBalance = {
   allocated: number;
   used: number;
   balance: number;
-  leave_type?: { name: string; is_unlimited: boolean };
+  leave_type?: {
+    name: string; is_unlimited: boolean; is_paid?: boolean; encashable?: boolean;
+    annual_quota?: number; accrual_frequency?: string; accrual_days?: number;
+    carry_forward?: boolean; max_carry_forward_days?: number; max_continuous_days?: number | null;
+  };
 };
 
 function LeaveBalanceRow({ balances }: { balances: LeaveBalance[] }) {
   if (!balances.length) return null;
   return (
     <View style={lb.wrap}>
-      {balances.map((b) => (
-        <View key={b.leave_type_id} style={lb.item}>
-          <Text style={lb.count}>{b.leave_type?.is_unlimited ? '∞' : b.balance}</Text>
-          <Text style={lb.label} numberOfLines={1}>{b.leave_type?.name || 'Leave'}</Text>
-        </View>
-      ))}
+      {balances.map((b) => {
+        const lt = b.leave_type;
+        const accrual = !lt?.accrual_frequency || lt.accrual_frequency === 'none'
+          ? null
+          : `+${lt.accrual_days} days/${lt.accrual_frequency === 'monthly' ? 'month' : 'year'}`;
+        const bal = Number(b.balance);
+        return (
+          <View key={b.leave_type_id} style={lb.item}>
+            <Text style={[lb.count, bal < 0 && { color: C.danger }]}>{lt?.is_unlimited ? '∞' : bal}</Text>
+            {!lt?.is_unlimited && <Text style={lb.unit}>{Math.abs(bal) === 1 ? 'day' : 'days'} left</Text>}
+            <Text style={lb.label} numberOfLines={1}>{lt?.name || 'Leave'}</Text>
+            {!lt?.is_unlimited && (
+              <View style={lb.factsRow}>
+                {!!accrual && <Text style={lb.fact}>{accrual}</Text>}
+                {!accrual && !!lt?.annual_quota && <Text style={lb.fact}>{lt.annual_quota} days/year</Text>}
+                {lt?.carry_forward && <Text style={lb.fact}>Carry forward up to {lt.max_carry_forward_days} days</Text>}
+              </View>
+            )}
+            <View style={lb.badgeRow}>
+              <Text style={[lb.badge, { color: lt?.is_paid ? C.success : C.muted, backgroundColor: lt?.is_paid ? C.successBg : C.bg }]}>
+                {lt?.is_paid ? 'Paid' : 'Unpaid'}
+              </Text>
+              {lt?.encashable && <Text style={[lb.badge, { color: C.teal, backgroundColor: C.tealBg }]}>Encashable</Text>}
+            </View>
+          </View>
+        );
+      })}
     </View>
   );
 }
@@ -42,12 +68,17 @@ const lb = StyleSheet.create({
     marginHorizontal: 16, marginBottom: 10,
   },
   item: {
-    flexGrow: 1, minWidth: 78, alignItems: 'center',
-    backgroundColor: C.surface, borderRadius: 14, paddingVertical: 10,
+    flexGrow: 1, minWidth: 130, alignItems: 'center',
+    backgroundColor: C.surface, borderRadius: 14, paddingVertical: 10, paddingHorizontal: 8,
     shadowColor: '#000', shadowOpacity: 0.05, shadowRadius: 8, elevation: 2,
   },
   count: { fontSize: 18, fontWeight: '800', color: C.primary },
+  unit: { fontSize: 9.5, color: C.muted, fontWeight: '600' },
   label: { fontSize: 10.5, color: C.muted, marginTop: 2, textAlign: 'center', paddingHorizontal: 4 },
+  factsRow: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', gap: 6, marginTop: 6 },
+  fact: { fontSize: 9.5, color: C.muted, fontWeight: '600' },
+  badgeRow: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', gap: 4, marginTop: 6 },
+  badge: { fontSize: 9, fontWeight: '700', borderRadius: 6, paddingHorizontal: 6, paddingVertical: 2, overflow: 'hidden' },
 });
 
 // Small pill for a Raniwala dual-approval row's manager/HR sub-status —
@@ -102,8 +133,6 @@ const bs = StyleSheet.create({
   text: { flex: 1, fontSize: 12.5, fontWeight: '500', lineHeight: 18 },
 });
 
-const BASE_LEAVE_TYPES = ['Casual Leave', 'Sick Leave', 'Paid Leave', 'Maternity/Paternity Leave', 'Loss of Pay'];
-
 const LEAVE_COLORS: Record<string, { color: string; bg: string }> = {
   'Casual Leave': { color: C.primary, bg: C.primaryBg },
   'Sick Leave': { color: C.danger, bg: C.dangerBg },
@@ -112,6 +141,7 @@ const LEAVE_COLORS: Record<string, { color: string; bg: string }> = {
   'Loss of Pay': { color: C.warning, bg: C.warningBg },
   'Comp Off': { color: C.teal, bg: C.tealBg },
   'Earned (Probation)': { color: '#F97316', bg: '#FFEDD5' },
+  'Earned Leave': { color: C.primary, bg: C.primaryBg },
 };
 
 const STATUS_STYLE: Record<string, { bg: string; color: string }> = {
@@ -123,7 +153,7 @@ const STATUS_STYLE: Record<string, { bg: string; color: string }> = {
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 const EMPTY_FORM = {
-  leave_type: 'Casual Leave',
+  leave_type: '',
   start_date: todayStr(),
   end_date: todayStr(),
   reason: '',
@@ -161,27 +191,56 @@ export default function LeavesScreen() {
   const [quota, setQuota] = useState<Quota | null>(null);
   const [balances, setBalances] = useState<LeaveBalance[]>([]);
   const [probation, setProbation] = useState<{ inProbation: boolean; endsOn: string | null; earnedLeaves: number } | null>(null);
+  const [activeLeaveTypeNames, setActiveLeaveTypeNames] = useState<string[]>([]);
 
   const raniwala = isRaniwalaTenant(tenant);
-  const hasCompOff = (profile?.ctc || 0) >= HIGH_SALARY_THRESHOLD && (profile?.comp_off_balance || 0) > 0;
+  // Mirrors src/pages/employee/MyLeavesPage.jsx's compOffEligible exactly —
+  // Raniwala makes every employee comp-off eligible regardless of CTC, since
+  // factory/lower-paid staff earn it just by punching in on their weekly off.
+  const compOffEligible = raniwala || (profile?.ctc || 0) >= HIGH_SALARY_THRESHOLD;
+  const compOffBalance = profile?.comp_off_balance || 0;
+  const hasCompOff = compOffEligible && compOffBalance > 0;
+  const earned = pickEarnedBalance(balances);
+  const earnedTypeName = balances.find((b) => /earned/i.test(b.leave_type?.name || ''))?.leave_type?.name
+    || activeLeaveTypeNames.find((n) => /earned/i.test(n)) || 'Earned Leave';
+  // Raniwala: employees only ever pick Earned Leave or Comp Off. Marriage /
+  // bereavement etc. are requested as Earned Leave with the occasion in the
+  // reason, and HR credits extra days to the balance when granting it.
   const leaveTypes = probation?.inProbation
     ? ['Earned (Probation)']
-    : [...BASE_LEAVE_TYPES, ...(hasCompOff ? ['Comp Off'] : [])];
+    : raniwala
+      ? [earnedTypeName, 'Comp Off']
+      : [...activeLeaveTypeNames, ...(hasCompOff ? ['Comp Off'] : [])];
+  const typeBalance = (t: string): number | null =>
+    t === 'Comp Off' ? compOffBalance : raniwala && t === earnedTypeName ? earned.balance : null;
 
   const fetchRequests = useCallback(async () => {
     if (!profile) return;
-    const [reqRes, probRes, quotaRes, balRes] = await Promise.all([
+    const [reqRes, probRes, quotaRes, balRes, typesRes] = await Promise.all([
       listMyLeaveRequests(profile.id),
       checkProbationStatus(profile.id),
       tenant ? fetchMyQuota(tenant.id, profile.id) : null,
       fetchMyLeaveBalances(profile.id),
+      tenant ? listLeaveTypes(tenant.id) : null,
     ]);
     if (reqRes.error) showToast(reqRes.error.message, 'error');
     else setRequests(reqRes.data);
     setProbation(probRes);
     if (quotaRes) setQuota(quotaRes);
     if (!balRes.error) setBalances(balRes.data as LeaveBalance[]);
+    if (typesRes && !typesRes.error) {
+      setActiveLeaveTypeNames(typesRes.data.filter((t: any) => t.is_active).map((t: any) => t.name));
+    }
   }, [profile, tenant]);
+
+  // Default the request form to the tenant's first active leave type, once
+  // known — the hardcoded 'Casual Leave' placeholder doesn't exist for every
+  // tenant (e.g. Raniwala only has Earned/Marriage/Bereavement Leave).
+  useEffect(() => {
+    if (!form.leave_type && leaveTypes.length > 0) {
+      setForm((f) => ({ ...f, leave_type: leaveTypes[0] }));
+    }
+  }, [leaveTypes, form.leave_type]);
 
   useForegroundRefresh(fetchRequests, setLoading);
 
@@ -209,6 +268,14 @@ export default function LeavesScreen() {
     if (probation?.inProbation && form.leave_type === 'Earned (Probation)' && (probation.earnedLeaves || 0) <= 0) {
       showToast('You have no earned probation leaves yet. Work all days in a month to earn one.', 'error');
       return;
+    }
+    if (raniwala && !probation?.inProbation) {
+      const avail = typeBalance(form.leave_type);
+      const need = daysBetween(form.start_date, form.end_date);
+      if (avail != null && need > avail) {
+        showToast(`Not enough ${form.leave_type} balance — you have ${avail} day${avail === 1 ? '' : 's'}, this request needs ${need}.`, 'error');
+        return;
+      }
     }
     setSaving(true);
     try {
@@ -252,33 +319,35 @@ export default function LeavesScreen() {
         </TouchableOpacity>
       </View>
 
-      {/* Banners */}
-      {probation?.inProbation && (
-        <View style={[s.infoBanner, { borderLeftColor: C.warning, backgroundColor: C.warningBg }]}>
-          <Ionicons name="hourglass-outline" size={15} color={C.warning} />
-          <Text style={[s.infoBannerText, { color: '#92400E' }]}>
-            <Text style={{ fontWeight: '700' }}>Probation</Text> ends {fmtDate(probation.endsOn)}. Regular leaves are blocked. {' '}
-            You have <Text style={{ fontWeight: '700' }}>{probation.earnedLeaves}</Text> earned leave{probation.earnedLeaves !== 1 ? 's' : ''} available.
-          </Text>
-        </View>
-      )}
-      {hasCompOff && !probation?.inProbation && (
-        <View style={[s.infoBanner, { borderLeftColor: C.primary, backgroundColor: C.primaryBg }]}>
-          <Ionicons name="gift-outline" size={15} color={C.primary} />
-          <Text style={[s.infoBannerText, { color: C.primary }]}>
-            You have <Text style={{ fontWeight: '700' }}>{profile?.comp_off_balance}</Text> Comp Off{(profile?.comp_off_balance || 0) > 1 ? 's' : ''} available.
-          </Text>
-        </View>
-      )}
-      {/* Raniwala leave requests route to the reporting manager (then HR for
-          >3 days), never auto-approve — this quota banner would be
-          misleading there. */}
-      {quota && !raniwala && <QuotaBanner quota={quota} />}
-      <LeaveBalanceRow balances={balances} />
-
       <ScrollView style={s.scroll} showsVerticalScrollIndicator={false}
         contentContainerStyle={{ paddingBottom: 140 }}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={C.primary} colors={[C.primary]} />}>
+        <View style={{ height: 12 }} />
+        {/* Banners */}
+        {probation?.inProbation && (
+          <View style={[s.infoBanner, { borderLeftColor: C.warning, backgroundColor: C.warningBg }]}>
+            <Ionicons name="hourglass-outline" size={15} color={C.warning} />
+            <Text style={[s.infoBannerText, { color: '#92400E' }]}>
+              <Text style={{ fontWeight: '700' }}>Probation</Text> ends {fmtDate(probation.endsOn)}. Regular leaves are blocked. {' '}
+              You have <Text style={{ fontWeight: '700' }}>{probation.earnedLeaves}</Text> earned leave{probation.earnedLeaves !== 1 ? 's' : ''} available.
+            </Text>
+          </View>
+        )}
+        {hasCompOff && !probation?.inProbation && !raniwala && (
+          <View style={[s.infoBanner, { borderLeftColor: C.primary, backgroundColor: C.primaryBg }]}>
+            <Ionicons name="gift-outline" size={15} color={C.primary} />
+            <Text style={[s.infoBannerText, { color: C.primary }]}>
+              You have <Text style={{ fontWeight: '700' }}>{profile?.comp_off_balance}</Text> Comp Off{(profile?.comp_off_balance || 0) > 1 ? 's' : ''} available.
+            </Text>
+          </View>
+        )}
+        {/* Raniwala leave requests route to the reporting manager (then HR for
+            >3 days), never auto-approve — this quota banner would be
+            misleading there. */}
+        {quota && !raniwala && <QuotaBanner quota={quota} />}
+        {raniwala && !probation?.inProbation
+          ? <LeaveBalanceCard earned={earned} compOff={compOffBalance} />
+          : <LeaveBalanceRow balances={balances} />}
         {loading ? (
           <View style={s.loadingBox}><ActivityIndicator color={C.primary} size="large" /></View>
         ) : requests.length === 0 ? (
@@ -361,6 +430,9 @@ export default function LeavesScreen() {
                 <TouchableOpacity style={s.select} onPress={() => setShowTypePicker(true)} activeOpacity={0.8}>
                   <View style={[s.selectDot, { backgroundColor: (LEAVE_COLORS[form.leave_type] || { color: C.primary }).color }]} />
                   <Text style={s.selectText}>{form.leave_type}</Text>
+                  {typeBalance(form.leave_type) != null && (
+                    <Text style={s.selectBal}>{typeBalance(form.leave_type)} left</Text>
+                  )}
                   <Ionicons name="chevron-down" size={16} color={C.muted} />
                 </TouchableOpacity>
               </View>
@@ -380,7 +452,7 @@ export default function LeavesScreen() {
                   style={[s.inputRaw, s.textarea]}
                   value={form.reason}
                   onChangeText={(v) => setForm((f) => ({ ...f, reason: v }))}
-                  placeholder="Please provide a brief reason…"
+                  placeholder={raniwala ? 'Brief reason — mention here if it is for marriage or another special occasion…' : 'Please provide a brief reason…'}
                   placeholderTextColor={C.muted}
                   multiline
                   numberOfLines={3}
@@ -417,6 +489,7 @@ export default function LeavesScreen() {
                 >
                   <View style={[s.pickerDot, { backgroundColor: lt.color }]} />
                   <Text style={[s.pickerText, form.leave_type === t && { color: lt.color, fontWeight: '700' }]}>{t}</Text>
+                  {typeBalance(t) != null && <Text style={s.pickerBal}>{typeBalance(t)} left</Text>}
                   {form.leave_type === t && <Ionicons name="checkmark-circle" size={18} color={lt.color} />}
                 </TouchableOpacity>
               );
@@ -532,6 +605,7 @@ const s = StyleSheet.create({
   },
   selectDot: { width: 10, height: 10, borderRadius: 5 },
   selectText: { flex: 1, fontSize: 14, color: C.text, fontWeight: '500' },
+  selectBal: { fontSize: 12, fontWeight: '700', color: C.primary },
   row: { flexDirection: 'row', gap: 12, marginBottom: 0 },
   modalFooter: { flexDirection: 'row', gap: 12, marginTop: 8, paddingBottom: 12 },
   cancelBtn: {
@@ -558,4 +632,5 @@ const s = StyleSheet.create({
   },
   pickerDot: { width: 10, height: 10, borderRadius: 5 },
   pickerText: { flex: 1, fontSize: 14, color: C.text },
+  pickerBal: { fontSize: 12, fontWeight: '700', color: C.muted },
 });

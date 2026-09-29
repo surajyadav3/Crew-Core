@@ -13,12 +13,17 @@ const normalizeHoliday = (h: any) => {
   return { ...h, holiday_date: dateValue, date: dateValue, status: h.status || 'Approved' };
 };
 
-/** List holidays for a tenant, ascending by date. Read-only — holiday management is admin/web-only. */
-export async function listHolidays(tenantId: string) {
-  const { data, error } = await supabase
+/**
+ * List holidays for a tenant, ascending by date. Read-only — holiday management is admin/web-only.
+ * With `outletId`, returns company-wide holidays plus that outlet's own (outlet-scoped holidays,
+ * 20260917_4_outlet_scoped_holidays.sql) — mirrors the website's tenantService.js listHolidays.
+ */
+export async function listHolidays(tenantId: string, outletId?: string | null) {
+  let query = supabase
     .from('holidays')
     .select('*')
-    .eq('tenant_id', tenantId)
-    .order('date', { ascending: true });
+    .eq('tenant_id', tenantId);
+  if (outletId) query = query.or(`outlet_id.is.null,outlet_id.eq.${outletId}`);
+  const { data, error } = await query.order('date', { ascending: true });
   return { data: (data || []).map(normalizeHoliday), error };
 }

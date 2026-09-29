@@ -1,9 +1,10 @@
 import { supabase } from '@/lib/supabase';
-import { todayStr, timeStr, diffHours, checkGeofenceMulti, geofenceIsConfigured } from '@/lib/helpers';
+import { todayStr, timeStr, diffHours, checkGeofenceMulti, geofenceIsConfigured, computeEarlyLateBreach } from '@/lib/helpers';
 import { getOrCreateQuota, determineApproverRole, incrementSelfCount } from './requestQuotaService';
 import { resolveAttendanceSettings, listAccessibleOutlets } from './tenantService';
 import { getApprovedWfhForDate } from './wfhService';
 import { isFeatureEnabledForOutlet } from './featureService';
+import { notifyProfiles, notifyRoles, getRequesterLabel } from './notificationService';
 
 function sendPunchNotification(tenantId: string, profileId: string, punchType: 'in' | 'out') {
   supabase.functions.invoke('send-notification', {
@@ -31,7 +32,19 @@ export async function fetchMyMonthAttendance(profileId: string, year: number, mo
     .gte('date', startDate)
     .lte('date', endDate)
     .order('date');
-  return { data: data || [], error };
+  return { data: (data || []).map(withMispunch), error };
+}
+
+/**
+ * A finished day with only a single punch (in without out, or vice versa) is
+ * a Mispunch — not Present/Late. Today is left alone since the employee may
+ * still punch out. Approved leave keeps its Leave status.
+ */
+export function withMispunch<T extends { date: string; status?: string; punches?: any[] }>(rec: T): T {
+  if (rec.date < todayStr() && (rec.punches?.length || 0) === 1 && rec.status !== 'Leave') {
+    return { ...rec, status: 'Mispunch' };
+  }
+  return rec;
 }
 
 export async function fetchMyMonthStats(profileId: string, year: number, month: number) {
@@ -251,6 +264,25 @@ export async function submitRegularizeRequest(
   profileId: string,
   { date, clockInTime, clockOutTime, reason }: { date: string; clockInTime: string; clockOutTime: string; reason: string }
 ) {
+  // Same guard as the website: nothing left to regularize once a date already
+  // has a Pending or Approved request.
+  const { data: existing } = await supabase
+    .from('regularize_requests')
+    .select('id, status')
+    .eq('profile_id', profileId)
+    .eq('date', date)
+    .in('status', ['Pending', 'Approved'])
+    .limit(1);
+  if (existing?.length) {
+    return {
+      data: null,
+      error: new Error(existing[0].status === 'Approved'
+        ? `Your attendance for ${date} has already been approved — no need to request again.`
+        : `You already have a pending regularization request for ${date}.`),
+      tier: null,
+    };
+  }
+
   const quota = await getOrCreateQuota(tenantId, profileId);
   const tier = determineApproverRole(quota);
 
@@ -266,17 +298,60 @@ export async function submitRegularizeRequest(
     approval_level: tier === 'self' ? 'self' : null,
   };
 
-  if (tier === 'self') {
-    await incrementSelfCount(tenantId, profileId);
-    await applyRegularization(tenantId, { date, clockInTime, clockOutTime, reason, changedBy: profileId });
-  }
-
+  // Insert the request FIRST. The DB rejects it outside the tenant's
+  // regularize window (enforce_regularize_request_window) and re-derives the
+  // tier from the tenant's current settings (enforce_regularize_request_
+  // approval_tier) — so only touch attendance / spend quota once the row has
+  // actually landed, and trust the tier the server stored, not ours.
   const { data, error } = await supabase
     .from('regularize_requests')
     .insert([payload])
     .select()
     .single();
-  return { data, error, tier };
+  if (error) return { data, error, tier };
+
+  const actualTier = data?.required_approver_role || tier;
+  if (actualTier === 'self') {
+    await applyRegularization(tenantId, { date, clockInTime, clockOutTime, reason, changedBy: profileId });
+    await incrementSelfCount(tenantId, profileId);
+  }
+
+  // Same notifications as the website's submitRegularizeRequest. Addressed
+  // to the approver role + HR; for Raniwala the DB trigger
+  // (trg_team_only_request_notifications) drops every manager/HOD copy
+  // except the employee's own reporting line.
+  if (data?.id) {
+    const requester = await getRequesterLabel(profileId);
+    if (actualTier === 'self') {
+      await notifyProfiles(tenantId, [profileId], {
+        type: 'regularize_auto_approved',
+        title: 'Regularize request auto-approved',
+        body: `Your attendance correction for ${date} was automatically approved.`,
+        linkKey: 'regularize_attendance',
+        relatedId: data.id,
+      });
+      await notifyRoles(tenantId, ['admin'], {
+        type: 'regularize_auto_approved',
+        title: 'Regularize request auto-approved',
+        body: `${requester} submitted an attendance correction for ${date} — auto-approved, no action needed.`,
+        linkKey: 'regularize_attendance',
+        actorId: profileId,
+        relatedId: data.id,
+      }, profileId);
+    } else {
+      // An HOD approves for the people directly under them, like a manager.
+      const roles = actualTier === 'manager' ? ['manager', 'hod', 'admin'] : [actualTier, 'admin'];
+      await notifyRoles(tenantId, [...new Set(roles)], {
+        type: 'regularize_request_submitted',
+        title: 'New regularize request',
+        body: `${requester} submitted a new attendance correction for ${date} — needs your review.`,
+        linkKey: 'regularize_attendance',
+        actorId: profileId,
+        relatedId: data.id,
+      }, profileId);
+    }
+  }
+  return { data, error, tier: actualTier };
 }
 
 export async function listMyRegularizeRequests(profileId: string) {
@@ -294,7 +369,7 @@ export async function clockOut(profileId: string, locationData: { lat: number; l
 
   const { data: att, error: fetchErr } = await supabase
     .from('attendance')
-    .select('id, tenant_id, profile:profiles!attendance_profile_id_fkey(outlet_id)')
+    .select('id, tenant_id, profile:profiles!attendance_profile_id_fkey(outlet_id, shift_id)')
     .eq('profile_id', profileId)
     .eq('date', today)
     .maybeSingle();
@@ -303,18 +378,22 @@ export async function clockOut(profileId: string, locationData: { lat: number; l
 
   // Thresholds: the employee's home outlet override, falling back to the tenant default.
   const outletId = (att as any).profile?.outlet_id;
+  const shiftId = (att as any).profile?.shift_id;
   const { data: tenantData } = await supabase
     .from('tenants')
-    .select('id, min_half_day_hours, min_full_day_hours, geofence_lat, geofence_lng, geofence_radius, allow_any_outlet_clockin')
+    .select('id, min_half_day_hours, min_full_day_hours, geofence_lat, geofence_lng, geofence_radius, allow_any_outlet_clockin, shift_start, shift_end')
     .eq('id', att.tenant_id)
     .single();
-  const [{ data: outlet }, { data: accessibleOutlets }, { data: approvedWfh }, geofencingOn] = await Promise.all([
+  const [{ data: outlet }, { data: accessibleOutlets }, { data: approvedWfh }, geofencingOn, { data: shift }] = await Promise.all([
     outletId
-      ? supabase.from('outlets').select('min_half_day_hours, min_full_day_hours, geofence_lat, geofence_lng, geofence_radius').eq('id', outletId).maybeSingle()
+      ? supabase.from('outlets').select('min_half_day_hours, min_full_day_hours, geofence_lat, geofence_lng, geofence_radius, shift_start, shift_end').eq('id', outletId).maybeSingle()
       : Promise.resolve({ data: null }),
     listAccessibleOutlets(profileId, outletId, tenantData),
     getApprovedWfhForDate(profileId, today),
     isFeatureEnabledForOutlet(att.tenant_id, outletId, 'geofencing'),
+    shiftId
+      ? supabase.from('shifts').select('start_time, end_time').eq('id', shiftId).maybeSingle()
+      : Promise.resolve({ data: null }),
   ]);
 
   // Authoritative, server-side geofence check for clock-OUT — same rule as
@@ -359,11 +438,43 @@ export async function clockOut(profileId: string, locationData: { lat: number; l
     status = 'Half Day';
   }
 
+  // Early Left / Late Arrival monthly-grace counter — independent, additive,
+  // visibility-only. Mirrors src/services/attendanceService.js clockOut()
+  // exactly, so web and mobile punches are counted the same way.
+  const sortedTimes = allPunches.map((p) => p.punch_time).sort();
+  const firstPunch = sortedTimes[0];
+  const lastPunch = sortedTimes[sortedTimes.length - 1];
+  const effectiveShiftStart = shift?.start_time || outlet?.shift_start || tenantData?.shift_start || '10:30';
+  const effectiveShiftEnd = shift?.end_time || outlet?.shift_end || tenantData?.shift_end || '18:00';
+  let earlyLateFlag = false;
+  let earlyLateGraced = false;
+  if (computeEarlyLateBreach(firstPunch, lastPunch, effectiveShiftStart, effectiveShiftEnd)) {
+    const monthStart = `${today.slice(0, 7)}-01`;
+    const { count: breachCount } = await supabase
+      .from('attendance')
+      .select('id', { count: 'exact', head: true })
+      .eq('profile_id', profileId)
+      // Any earlier breach day this month — graced OR counted. Counting only
+      // flagged rows kept the count at 0 after the graced first breach, so
+      // every breach in the month was graced. Today excluded so a re-punch
+      // on the same day doesn't count itself.
+      .or('early_late_flag.eq.true,early_late_graced.eq.true')
+      .gte('date', monthStart)
+      .lt('date', today);
+    if (!breachCount) {
+      earlyLateGraced = true;
+    } else {
+      earlyLateFlag = true;
+    }
+  }
+
   await supabase
     .from('attendance')
     .update({
       total_hours: Math.round(total * 100) / 100,
       status,
+      early_late_flag: earlyLateFlag,
+      early_late_graced: earlyLateGraced,
       punch_out_lat: locationData?.lat,
       punch_out_lng: locationData?.lng,
     })

@@ -18,7 +18,7 @@ import { Colors as C } from '@/constants/Colors';
 const { width: W, height: H } = Dimensions.get('window');
 
 export default function LoginScreen() {
-  const { signIn, sendOtp, verifyOtp, user, profile, loading, signOut } = useAuth();
+  const { signIn, sendOtp, verifyOtp, user, profile, loading, signOut, profileStatus } = useAuth();
   const router = useRouter();
 
   const [mode, setMode] = useState<'password' | 'otp' | 'reset'>('password');
@@ -60,8 +60,10 @@ export default function LoginScreen() {
 
   useEffect(() => {
     if (loading || !user || awaitingNewPassword) return;
-    router.replace((profile ? '/' : '/register') as any);
-  }, [user, profile, loading, awaitingNewPassword]);
+    // '/' decides between the app, registration (server-confirmed no profile)
+    // and the offline "connecting" screen.
+    router.replace((profile || profileStatus !== 'missing' ? '/' : '/register') as any);
+  }, [user, profile, loading, awaitingNewPassword, profileStatus]);
 
   // Always land on a clean, empty form — e.g. right after signing out.
   useFocusEffect(

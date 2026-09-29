@@ -6,11 +6,16 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect } from '@react-navigation/native';
 import { useAuth } from '@/context/AuthContext';
+import { useFeatures } from '@/context/FeatureContext';
 import { useClockInOut } from '@/hooks/useClockInOut';
-import { fetchMyMonthAttendance } from '@/services/attendanceService';
+import { fetchMyMonthAttendance, listMyRegularizeRequests } from '@/services/attendanceService';
 import { listHolidays } from '@/services/holidayService';
+import { getOutlet } from '@/services/tenantService';
 import { showToast } from '@/components/Toast';
-import { todayStr, dateStr, fmtTime12, fmtHMS, fmtDate, monthLabel } from '@/lib/helpers';
+import RegularizeRequestModal from '@/components/RegularizeRequestModal';
+import RegularizeExtensionNotice from '@/components/RegularizeExtensionNotice';
+import { todayStr, dateStr, fmtTime12, fmtHMS, fmtDate, monthLabel, isTenantWeeklyOff, getEarlyLateBreakdown, regularizeMinDate, regularizeWindowLabel } from '@/lib/helpers';
+import { supabase } from '@/lib/supabase';
 
 import { Colors as C } from '@/constants/Colors';
 
@@ -21,6 +26,7 @@ const STATUS_COLORS: Record<string, string> = {
   'Half Day': '#F97316',
   Absent: C.danger,
   Leave: C.purple,
+  Mispunch: '#DB2777',
 };
 
 // ── Live clock pulse ──────────────────────────────────────────────────────────
@@ -63,14 +69,23 @@ export default function AttendanceScreen() {
   const [selectedDate, setSelectedDate] = useState(todayStr());
   const [myRecords, setMyRecords] = useState<any[]>([]);
   const [holidays, setHolidays] = useState<any[]>([]);
+  const [myOutlet, setMyOutlet] = useState<any>(null);
+  const [myShift, setMyShift] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [myRegRequests, setMyRegRequests] = useState<any[]>([]);
+  const [showRegModal, setShowRegModal] = useState(false);
+  const { isEnabled } = useFeatures();
 
   const btnScale = useRef(new Animated.Value(1)).current;
 
   const fetchData = useCallback(async () => {
     if (!profile || !tenant) return;
-    const { data, error } = await fetchMyMonthAttendance(profile.id, attYear, attMonth);
+    const [{ data, error }, regRes] = await Promise.all([
+      fetchMyMonthAttendance(profile.id, attYear, attMonth),
+      listMyRegularizeRequests(profile.id),
+    ]);
+    if (!regRes.error) setMyRegRequests(regRes.data);
     if (error) { showToast('Could not load attendance records.', 'error'); return; }
     setMyRecords(data);
   }, [profile, tenant, attMonth, attYear]);
@@ -90,11 +105,27 @@ export default function AttendanceScreen() {
 
   useEffect(() => {
     if (!tenant) return;
-    listHolidays(tenant.id).then(({ data, error }) => {
+    // Company-wide holidays plus this employee's outlet-only ones.
+    listHolidays(tenant.id, profile?.outlet_id).then(({ data, error }) => {
       if (error) { showToast('Could not load holidays.', 'error'); return; }
       setHolidays(data);
     });
-  }, [tenant]);
+  }, [tenant, profile?.outlet_id]);
+
+  // Assigned shift (if any) — its start/end are what Late Arrival / Early Left
+  // are measured against, same precedence as clockOut: shift > outlet > tenant.
+  useEffect(() => {
+    if (!profile?.shift_id) { setMyShift(null); return; }
+    supabase.from('shifts').select('start_time, end_time').eq('id', profile.shift_id).maybeSingle()
+      .then(({ data }) => setMyShift(data));
+  }, [profile?.shift_id]);
+
+  // Needed so the calendar's weekend shading follows this employee's actual
+  // outlet — e.g. Raniwala's Delhi outlet is off Monday, not Sat/Sun.
+  useEffect(() => {
+    if (!profile?.outlet_id) { setMyOutlet(null); return; }
+    getOutlet(profile.outlet_id).then(({ data }) => setMyOutlet(data));
+  }, [profile?.outlet_id]);
 
   const animateBtn = () => {
     Animated.sequence([
@@ -129,7 +160,7 @@ export default function AttendanceScreen() {
       const ds = dateStr(date);
       const isToday = ds === todayStr();
       const isFuture = date > today;
-      const isWeekend = date.getDay() === 0 || date.getDay() === 6;
+      const isWeekend = isTenantWeeklyOff(date, tenant, myOutlet);
       const holiday = holidays.find((h) => h.date === ds && h.status === 'Approved');
       const rec = myRecords.find((r) => r.date === ds);
 
@@ -137,9 +168,10 @@ export default function AttendanceScreen() {
       let textColor = C.text;
 
       if (isToday) bg = C.primary;
-      else if (isFuture) textColor = '#CBD5E1';
       else if (holiday) { bg = C.teal + '22'; textColor = C.teal; }
-      else if (isWeekend) textColor = C.muted;
+      else if (isFuture) { textColor = '#CBD5E1'; if (isWeekend) bg = C.border + '66'; }
+      // Worked on an off day still shows its real status.
+      else if (isWeekend && !rec) { bg = C.border + '66'; textColor = C.muted; }
       else if (rec) {
         bg = (STATUS_COLORS[rec.status] || C.primary) + '22';
         textColor = STATUS_COLORS[rec.status] || C.text;
@@ -163,8 +195,12 @@ export default function AttendanceScreen() {
           activeOpacity={0.6}
         >
           <Text style={[s.calDay, { color: isToday ? '#fff' : textColor, fontWeight: isToday ? '800' : '400' }]}>{d}</Text>
+          {isWeekend && !rec && !holiday && !isToday && <Text style={s.calOff}>Off</Text>}
           {rec && !isToday && !holiday && (
             <View style={[s.calDot, { backgroundColor: STATUS_COLORS[rec?.status] || C.primary }]} />
+          )}
+          {(rec?.early_late_flag || rec?.early_late_graced) && (
+            <View style={[s.elDot, { backgroundColor: rec.early_late_flag ? C.danger : C.muted }]} />
           )}
         </TouchableOpacity>
       );
@@ -172,11 +208,11 @@ export default function AttendanceScreen() {
     return cells;
   };
 
-  const summary = { present: 0, absent: 0, halfDay: 0, late: 0, leaves: 0, totalHours: 0 };
+  const summary = { present: 0, absent: 0, halfDay: 0, late: 0, mispunch: 0, leaves: 0, totalHours: 0, earlyLate: 0 };
   const today = new Date();
   for (let d = 1; d <= new Date(attYear, attMonth + 1, 0).getDate(); d++) {
     const date = new Date(attYear, attMonth, d);
-    if (date > today || date.getDay() === 0 || date.getDay() === 6) continue;
+    if (date > today || isTenantWeeklyOff(date, tenant, myOutlet)) continue;
     const ds = dateStr(date);
     if (holidays.find((h) => h.date === ds && h.status === 'Approved')) continue;
     const rec = myRecords.find((r) => r.date === ds);
@@ -186,6 +222,8 @@ export default function AttendanceScreen() {
     else if (rec.status === 'Half Day') summary.halfDay++;
     else if (rec.status === 'Leave') summary.leaves++;
     else if (rec.status === 'Absent') summary.absent++;
+    else if (rec.status === 'Mispunch') summary.mispunch++;
+    if (rec.early_late_flag) summary.earlyLate++;
     // Today's total_hours is only (re)written on clock-out, so while still
     // clocked in it excludes today's in-progress session — skip it here and
     // add the live-ticking total below instead (mirrors the Home screen).
@@ -207,6 +245,63 @@ export default function AttendanceScreen() {
     ? clock.myPunches?.punches || []
     : myRecords.find((r) => r.date === selectedDate)?.punches || [];
 
+  // What the selected day was: holiday / weekly off / its attendance status,
+  // plus Late Arrival / Early Left (90-min rule) against the effective shift.
+  const selectedRec = myRecords.find((r) => r.date === selectedDate);
+  const selectedHoliday = holidays.find((h) => h.date === selectedDate && h.status === 'Approved');
+  const selectedIsOff = isTenantWeeklyOff(new Date(selectedDate + 'T00:00:00'), tenant, myOutlet);
+  const shiftStart = myShift?.start_time || myOutlet?.shift_start || tenant?.shift_start || '10:30';
+  const shiftEnd = myShift?.end_time || myOutlet?.shift_end || tenant?.shift_end || '18:00';
+  const sortedPunches = [...selectedPunches].sort((a: any, b: any) => a.punch_time.localeCompare(b.punch_time));
+  const firstPunch = sortedPunches[0]?.punch_time;
+  const lastPunch = sortedPunches[sortedPunches.length - 1]?.punch_time;
+  const breakdown = getEarlyLateBreakdown(firstPunch, lastPunch, shiftStart, shiftEnd);
+  // A mispunch day is flagged as such, not as Late Arrival.
+  const lateArrival = !!firstPunch && breakdown.lateArrival && selectedRec?.status !== 'Mispunch';
+  // Still clocked in → the day isn't over, so it can't be "early left" yet.
+  const earlyLeft = sortedPunches[sortedPunches.length - 1]?.punch_type === 'out' && breakdown.earlyLeft;
+  const dayChips: { label: string; color: string; bg: string; icon: keyof typeof Ionicons.glyphMap }[] = [];
+  if (selectedHoliday) dayChips.push({ label: `Holiday · ${selectedHoliday.name}`, color: C.teal, bg: C.tealBg, icon: 'gift-outline' });
+  if (selectedIsOff) dayChips.push({ label: 'Weekly Off', color: C.muted, bg: C.border, icon: 'bed-outline' });
+  if (selectedRec?.status) {
+    const color = STATUS_COLORS[selectedRec.status] || C.primary;
+    dayChips.push({ label: selectedRec.status, color, bg: color + '22', icon: selectedRec.status === 'Late' ? 'alarm-outline' : selectedRec.status === 'Mispunch' ? 'finger-print' : 'checkmark-circle-outline' });
+  }
+  if (lateArrival) dayChips.push({ label: `Late Arrival · in at ${fmtTime12(firstPunch)} (shift ${fmtTime12(shiftStart)})`, color: C.danger, bg: C.dangerBg, icon: 'log-in-outline' });
+  if (earlyLeft) dayChips.push({ label: `Early Left · out at ${fmtTime12(lastPunch)} (shift ends ${fmtTime12(shiftEnd)})`, color: C.danger, bg: C.dangerBg, icon: 'log-out-outline' });
+  // Regularize straight from the calendar: a Late / Mispunch / Half Day /
+  // Absent day (or a working day with no record at all) that's still inside
+  // the tenant's regularize window (default today + yesterday — the DB
+  // enforces the same window, see enforce_regularize_request_window).
+  const selectedNeedsFix = selectedRec
+    ? ['Late', 'Mispunch', 'Half Day', 'Absent'].includes(selectedRec.status) || lateArrival || earlyLeft
+    : !selectedHoliday && !selectedIsOff && selectedDate < todayStr();
+  const selectedRegRequest = myRegRequests.find((r) => r.date === selectedDate && r.status !== 'Rejected');
+  const selectedInRegWindow = selectedDate <= todayStr() && selectedDate >= regularizeMinDate(tenant);
+  const regEnabled = isEnabled('regularize_attendance');
+  // Any working day inside the window can be regularized (e.g. a wrong punch
+  // on an otherwise Present day), not just the flagged ones.
+  const showRegularize = regEnabled
+    && (selectedNeedsFix || (selectedInRegWindow && !selectedHoliday && !selectedIsOff));
+  // Header shortcut: regularizes whichever calendar day is selected.
+  const openRegularize = () => {
+    if (selectedRegRequest) {
+      showToast(`Regularization for ${fmtDate(selectedDate)} is already ${selectedRegRequest.status === 'Approved' ? 'approved' : 'pending approval'}.`, 'info');
+    } else if (!selectedInRegWindow) {
+      showToast(`Select a date on the calendar — regularization is allowed for ${regularizeWindowLabel(tenant)} only.`, 'info');
+    } else {
+      setShowRegModal(true);
+    }
+  };
+  const regDefaultIn = sortedPunches[0]?.punch_type === 'in' && !lateArrival ? firstPunch : shiftStart;
+  const regDefaultOut = sortedPunches[sortedPunches.length - 1]?.punch_type === 'out' && !earlyLeft ? lastPunch : shiftEnd;
+
+  const earlyLateNote = selectedRec?.early_late_flag
+    ? "Counted towards this month's Early Left / Late Arrival."
+    : selectedRec?.early_late_graced
+      ? 'First Early Left / Late Arrival this month — graced, not counted.'
+      : null;
+
   return (
     <SafeAreaView style={s.safe} edges={['top']}>
       <ScrollView style={s.scroll} showsVerticalScrollIndicator={false}
@@ -215,9 +310,19 @@ export default function AttendanceScreen() {
 
         {/* ── Page header ── */}
         <View style={s.pageHeader}>
-          <Text style={s.pageTitle}>Attendance</Text>
-          <Text style={s.pageSubtitle}>{monthLabel(attMonth, attYear)}</Text>
+          <View>
+            <Text style={s.pageTitle}>Attendance</Text>
+            <Text style={s.pageSubtitle}>{monthLabel(attMonth, attYear)}</Text>
+          </View>
+          {regEnabled && (
+            <TouchableOpacity style={s.headerRegBtn} onPress={openRegularize} activeOpacity={0.85}>
+              <Ionicons name="create-outline" size={16} color="#fff" />
+              <Text style={s.headerRegBtnText}>Regularize</Text>
+            </TouchableOpacity>
+          )}
         </View>
+
+        {regEnabled && <RegularizeExtensionNotice tenant={tenant} style={{ marginBottom: 12 }} />}
 
         {/* ── Clock Widget ── */}
         <View style={s.clockWidget}>
@@ -283,10 +388,12 @@ export default function AttendanceScreen() {
             { val: summary.absent, lbl: 'Absent', color: C.danger },
             { val: summary.halfDay, lbl: 'Half Day', color: '#F97316' },
             { val: summary.late, lbl: 'Late', color: C.warning },
+            { val: summary.mispunch, lbl: 'Mispunch', color: '#DB2777' },
+            { val: summary.earlyLate, lbl: 'Early/Late', color: C.danger },
             { val: summary.leaves, lbl: 'Leaves', color: C.purple },
             { val: fmtHMS(summary.totalHours * 3600), lbl: 'Hrs', color: C.primary },
           ].map((item, idx) => (
-            <View key={item.lbl} style={[s.summaryItem, idx < 5 && s.summaryItemBorder]}>
+            <View key={item.lbl} style={[s.summaryItem, idx % 4 !== 3 && s.summaryItemBorder]}>
               <Text style={[s.summaryVal, { color: item.color }]}>{item.val}</Text>
               <Text style={s.summaryLbl}>{item.lbl}</Text>
             </View>
@@ -315,6 +422,17 @@ export default function AttendanceScreen() {
           ) : (
             <View style={s.calendar}>{renderCalendar()}</View>
           )}
+          {/* Regularize the day selected on the calendar — goes to the
+              employee's reporting manager for approval, with HR notified. */}
+          {regEnabled && (
+            <View style={s.calRegWrap}>
+              <TouchableOpacity style={s.regBtn} onPress={openRegularize} activeOpacity={0.85}>
+                <Ionicons name="create-outline" size={16} color={C.primary} />
+                <Text style={s.regBtnText}>Regularize {fmtDate(selectedDate)}</Text>
+              </TouchableOpacity>
+              <Text style={s.calRegNote}>Tap a date above, then send a correction to your manager & HR for approval.</Text>
+            </View>
+          )}
           {/* Legend */}
           <View style={s.legend}>
             {Object.entries(STATUS_COLORS).map(([key, color]) => (
@@ -323,6 +441,18 @@ export default function AttendanceScreen() {
                 <Text style={s.legendText}>{key}</Text>
               </View>
             ))}
+            <View style={s.legendItem}>
+              <View style={[s.legendDot, { backgroundColor: C.teal }]} />
+              <Text style={s.legendText}>Holiday</Text>
+            </View>
+            <View style={s.legendItem}>
+              <View style={[s.legendDot, { backgroundColor: C.border }]} />
+              <Text style={s.legendText}>Weekly Off</Text>
+            </View>
+            <View style={s.legendItem}>
+              <View style={[s.legendDot, { backgroundColor: C.danger, width: 6, height: 6 }]} />
+              <Text style={s.legendText}>Early Left / Late Arrival</Text>
+            </View>
           </View>
         </View>
 
@@ -334,6 +464,33 @@ export default function AttendanceScreen() {
               <Text style={s.cardTitle}>{isSelectedToday ? "Today's Timeline" : fmtDate(selectedDate)}</Text>
             </View>
           </View>
+          {(dayChips.length > 0 || !!earlyLateNote) && (
+            <View style={s.dayChips}>
+              {dayChips.map((c) => (
+                <View key={c.label} style={[s.dayChip, { backgroundColor: c.bg }]}>
+                  <Ionicons name={c.icon} size={13} color={c.color} />
+                  <Text style={[s.dayChipText, { color: c.color }]}>{c.label}</Text>
+                </View>
+              ))}
+              {!!earlyLateNote && <Text style={s.dayNote}>{earlyLateNote}</Text>}
+            </View>
+          )}
+          {showRegularize && (
+            selectedRegRequest ? (
+              <View style={s.regStatus}>
+                <Ionicons name={selectedRegRequest.status === 'Approved' ? 'checkmark-circle' : 'hourglass-outline'} size={15}
+                  color={selectedRegRequest.status === 'Approved' ? C.success : C.warning} />
+                <Text style={s.regStatusText}>Regularization {selectedRegRequest.status === 'Approved' ? 'approved' : 'pending approval'}</Text>
+              </View>
+            ) : selectedInRegWindow ? (
+              <TouchableOpacity style={s.regBtn} onPress={() => setShowRegModal(true)} activeOpacity={0.85}>
+                <Ionicons name="create-outline" size={16} color={C.primary} />
+                <Text style={s.regBtnText}>Request Regularization</Text>
+              </TouchableOpacity>
+            ) : (
+              <Text style={s.regNote}>Regularization can only be requested for {regularizeWindowLabel(tenant)}.</Text>
+            )
+          )}
           {!selectedPunches.length ? (
             <View style={s.emptyRow}>
               <Ionicons name="time-outline" size={28} color={C.muted} />
@@ -365,6 +522,14 @@ export default function AttendanceScreen() {
           )}
         </View>
       </ScrollView>
+      <RegularizeRequestModal
+        visible={showRegModal}
+        date={selectedDate}
+        defaultIn={regDefaultIn}
+        defaultOut={regDefaultOut}
+        onClose={() => setShowRegModal(false)}
+        onSubmitted={fetchData}
+      />
     </SafeAreaView>
   );
 }
@@ -373,9 +538,15 @@ const s = StyleSheet.create({
   safe: { flex: 1, backgroundColor: C.dark },
   scroll: { flex: 1, backgroundColor: C.bg },
   pageHeader: {
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
     paddingHorizontal: 20, paddingTop: 18, paddingBottom: 14,
     backgroundColor: C.dark,
   },
+  headerRegBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: C.primary,
+    paddingHorizontal: 14, paddingVertical: 9, borderRadius: 14,
+  },
+  headerRegBtnText: { color: '#fff', fontSize: 13, fontWeight: '700' },
   pageTitle: { fontSize: 24, fontWeight: '900', color: '#fff' },
   pageSubtitle: { fontSize: 13, color: 'rgba(255,255,255,0.4)', marginTop: 2 },
 
@@ -435,12 +606,12 @@ const s = StyleSheet.create({
 
   // Summary strip
   summaryStrip: {
-    flexDirection: 'row', backgroundColor: C.surface,
+    flexDirection: 'row', flexWrap: 'wrap', rowGap: 12, backgroundColor: C.surface,
     marginHorizontal: 14, borderRadius: 18,
     paddingVertical: 14, paddingHorizontal: 6, marginBottom: 14,
     shadowColor: '#000', shadowOpacity: 0.06, shadowRadius: 10, elevation: 3,
   },
-  summaryItem: { flex: 1, alignItems: 'center' },
+  summaryItem: { width: '25%', alignItems: 'center' },
   summaryItemBorder: { borderRightWidth: 1, borderRightColor: C.border },
   summaryVal: { fontSize: 16, fontWeight: '900' },
   summaryLbl: { fontSize: 9, color: C.muted, marginTop: 3, fontWeight: '600', textTransform: 'uppercase' },
@@ -465,10 +636,30 @@ const s = StyleSheet.create({
   // Calendar
   calendar: { flexDirection: 'row', flexWrap: 'wrap' },
   calHeader: { width: '14.28%', textAlign: 'center', fontSize: 10, color: C.muted, fontWeight: '700', paddingVertical: 6, textTransform: 'uppercase' },
-  calCell: { width: '14.28%', aspectRatio: 1, alignItems: 'center', justifyContent: 'center', padding: 1 },
+  calCell: { width: '14.28%', aspectRatio: 1, alignItems: 'center', justifyContent: 'center', padding: 1, position: 'relative' },
   calCellSelected: { borderWidth: 1.5, borderColor: C.primary },
   calDay: { fontSize: 12, color: C.text },
   calDot: { width: 4, height: 4, borderRadius: 2, marginTop: 2 },
+  calOff: { fontSize: 7.5, color: C.muted, fontWeight: '700', marginTop: 1, textTransform: 'uppercase' },
+  dayChips: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 12 },
+  dayChip: { flexDirection: 'row', alignItems: 'center', gap: 5, borderRadius: 10, paddingHorizontal: 9, paddingVertical: 5, maxWidth: '100%' },
+  dayChipText: { fontSize: 11.5, fontWeight: '700', flexShrink: 1 },
+  dayNote: { width: '100%', fontSize: 11.5, color: C.muted, marginTop: 2 },
+  regBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6,
+    borderWidth: 1.5, borderColor: C.primary, backgroundColor: C.primaryBg,
+    borderRadius: 12, paddingVertical: 10, marginBottom: 12,
+  },
+  regBtnText: { fontSize: 13, fontWeight: '700', color: C.primary },
+  calRegWrap: { marginTop: 12 },
+  calRegNote: { fontSize: 11.5, color: C.muted, textAlign: 'center', marginTop: -4, marginBottom: 8 },
+  regStatus: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    backgroundColor: C.bg, borderRadius: 12, paddingVertical: 9, paddingHorizontal: 12, marginBottom: 12,
+  },
+  regStatusText: { fontSize: 12.5, fontWeight: '600', color: C.text },
+  regNote: { fontSize: 11.5, color: C.muted, marginBottom: 12 },
+  elDot: { position: 'absolute', top: 3, right: 5, width: 6, height: 6, borderRadius: 3 },
   legend: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginTop: 12, paddingTop: 10, borderTopWidth: 1, borderTopColor: C.border },
   legendItem: { flexDirection: 'row', alignItems: 'center', gap: 5 },
   legendDot: { width: 8, height: 8, borderRadius: 4 },

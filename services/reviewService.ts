@@ -3,7 +3,7 @@ import { supabase } from '@/lib/supabase';
 const REVIEW_LIST_SELECT = `
   *,
   cycle:review_cycles(*),
-  reporting_manager:profiles!reviews_reporting_manager_id_fkey(first_name, middle_name, last_name)
+  reporting_manager:profile_directory!reviews_reporting_manager_id_fkey(first_name, middle_name, last_name)
 `;
 
 export async function listMyReviews(tenantId: string, profileId: string) {

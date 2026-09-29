@@ -2,9 +2,9 @@ import { supabase } from '@/lib/supabase';
 
 const SELECT = `
   *,
-  from_profile:profiles!feedback_from_profile_id_fkey(first_name, middle_name, last_name),
-  to_profile:profiles!feedback_to_profile_id_fkey(first_name, middle_name, last_name),
-  requested_from_profile:profiles!feedback_requested_from_fkey(first_name, middle_name, last_name)
+  from_profile:profile_directory!feedback_from_profile_id_fkey(first_name, middle_name, last_name),
+  to_profile:profile_directory!feedback_to_profile_id_fkey(first_name, middle_name, last_name),
+  requested_from_profile:profile_directory!feedback_requested_from_fkey(first_name, middle_name, last_name)
 `;
 
 /** Feedback received about me (completed, not pending requests). */
@@ -46,7 +46,7 @@ export async function listPendingRequests(tenantId: string, profileId: string) {
 /** Colleagues in my tenant I can give/request feedback to or from. */
 export async function listColleagues(tenantId: string, excludeProfileId: string) {
   const { data, error } = await supabase
-    .from('profiles')
+    .from('profile_directory')
     .select('id, first_name, middle_name, last_name, role')
     .eq('tenant_id', tenantId)
     .eq('status', 'Active')

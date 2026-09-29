@@ -90,7 +90,7 @@ export async function updateInterviewStatus(id: string, status: string) {
 export async function listAllReferrals(tenantId: string) {
   const { data, error } = await supabase
     .from('referrals')
-    .select('*, job_postings(title, department), referred_by_profile:profiles!referrals_referred_by_fkey(first_name, middle_name, last_name)')
+    .select('*, job_postings(title, department), referred_by_profile:profile_directory!referrals_referred_by_fkey(first_name, middle_name, last_name)')
     .eq('tenant_id', tenantId)
     .order('created_at', { ascending: false });
   return { data: data || [], error };
@@ -99,7 +99,7 @@ export async function listAllReferrals(tenantId: string) {
 export async function listInterviewsForReferral(referralId: string) {
   const { data, error } = await supabase
     .from('interviews')
-    .select('*, interviewer:profiles!interviews_interviewer_id_fkey(first_name, middle_name, last_name), feedback:interview_feedback(*)')
+    .select('*, interviewer:profile_directory!interviews_interviewer_id_fkey(first_name, middle_name, last_name), feedback:interview_feedback(*)')
     .eq('referral_id', referralId)
     .order('scheduled_at');
   return { data: data || [], error };

@@ -1,9 +1,10 @@
 import { Redirect } from 'expo-router';
 import { useAuth } from '@/context/AuthContext';
 import { View, ActivityIndicator, StyleSheet } from 'react-native';
+import ConnectingScreen from '@/components/ConnectingScreen';
 
 export default function Index() {
-  const { user, profile, loading } = useAuth();
+  const { user, profile, loading, profileStatus } = useAuth();
 
   if (loading) {
     return (
@@ -14,7 +15,9 @@ export default function Index() {
   }
 
   if (!user) return <Redirect href={'/login' as any} />;
-  if (!profile) return <Redirect href={'/register' as any} />;
+  // Only a server-confirmed "no profile" means registration; a profile that
+  // just couldn't load (offline) keeps the user signed in.
+  if (!profile) return profileStatus === 'missing' ? <Redirect href={'/register' as any} /> : <ConnectingScreen />;
   return <Redirect href={'/(tabs)' as any} />;
 }
 

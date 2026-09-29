@@ -23,7 +23,7 @@ const RECOMMENDATIONS = ['Strong Yes', 'Yes', 'Neutral', 'No', 'Strong No'];
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const TIME_RE = /^\d{2}:\d{2}$/;
 
-const fullName = (p: any) => [p?.first_name, p?.middle_name, p?.last_name].filter(Boolean).join(' ') || 'Unknown';
+const fullName = (p: any) => [p?.first_name, p?.middle_name, p?.last_name].filter(Boolean).join(' ').toUpperCase() || 'UNKNOWN';
 
 export default function InterviewsScreen() {
   const router = useRouter();

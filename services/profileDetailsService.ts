@@ -65,3 +65,39 @@ export async function upsertProfileDetails(tenantId: string, profileId: string, 
     .single();
   return { data, error };
 }
+
+export type CelebrationPerson = {
+  id: string;
+  first_name: string;
+  middle_name?: string | null;
+  last_name: string;
+  division?: string | null;
+  outlet_location?: string | null;
+};
+export type UpcomingCelebration = { profile: CelebrationPerson; date: string; diffDays: number; years: number };
+
+/**
+ * Upcoming birthdays + work anniversaries via the list_upcoming_celebrations() RPC
+ * (payroll web repo: supabase/migrations/20260923_2_upcoming_celebrations_rpc.sql).
+ * RLS only lets an employee read their own profile row, so the RPC returns just the
+ * display fields — scoped to the caller's outlet for employees, whole tenant for
+ * admin/manager. Mirrors the web Home page's Birthdays / Anniversaries cards.
+ */
+export async function listUpcomingCelebrations(days = 5) {
+  const { data, error } = await supabase.rpc('list_upcoming_celebrations', { p_days: days });
+  const empty = { birthdays: [] as UpcomingCelebration[], anniversaries: [] as UpcomingCelebration[] };
+  if (error) return { data: empty, error };
+  for (const r of (data || []) as any[]) {
+    const row: UpcomingCelebration = {
+      profile: {
+        id: r.profile_id, first_name: r.first_name, middle_name: r.middle_name, last_name: r.last_name,
+        division: r.division, outlet_location: r.outlet_location,
+      },
+      date: r.event_date,
+      diffDays: r.days_away,
+      years: r.years,
+    };
+    (r.kind === 'birthday' ? empty.birthdays : empty.anniversaries).push(row);
+  }
+  return { data: empty, error: null };
+}

@@ -20,6 +20,7 @@ import { FeatureProvider } from '@/context/FeatureContext';
 import { ToastProvider } from '@/components/Toast';
 import ForcePasswordChange from '@/components/ForcePasswordChange';
 import LocationConsentGate from '@/components/LocationConsentGate';
+import AppUpdatePrompt from '@/components/AppUpdatePrompt';
 import { initNotificationResponseListener, markNavigationReady } from '@/lib/pushNotifications';
 
 SplashScreen.preventAutoHideAsync().catch(() => {});
@@ -247,6 +248,7 @@ export default function RootLayout() {
             </Stack>
             <ForcePasswordChange />
             <LocationConsentGate />
+            {splashDone && <AppUpdatePrompt />}
             {!splashDone && <SplashOverlay onDone={() => setSplashDone(true)} />}
           </ToastProvider>
         </FeatureProvider>

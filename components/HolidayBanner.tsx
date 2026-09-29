@@ -31,8 +31,9 @@ const DEFAULT_THEME: { colors: [string, string, ...string[]]; icon: keyof typeof
 };
 const getHolidayTheme = (name = '') => HOLIDAY_THEMES.find((t) => t.match.test(name)) || DEFAULT_THEME;
 
-export default function HolidayBanner() {
-  const { tenant } = useAuth();
+/** `todayOnly` (Raniwala HOD / HR Home): just today's holiday, and nothing at all on a working day. */
+export default function HolidayBanner({ todayOnly = false }: { todayOnly?: boolean }) {
+  const { tenant, profile } = useAuth();
   const [holidays, setHolidays] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [index, setIndex] = useState(0);
@@ -40,16 +41,19 @@ export default function HolidayBanner() {
   const fetchHolidays = useCallback(async () => {
     if (!tenant?.id) { setLoading(false); return; }
     const today = todayStr();
-    const { data } = await listHolidays(tenant.id);
-    const upcoming = (data || []).filter((h: any) => h.status === 'Approved' && h.date >= today).slice(0, 8);
+    const { data } = await listHolidays(tenant.id, profile?.outlet_id);
+    // Every upcoming approved holiday for the employee's branch (+ company-wide).
+    const upcoming = (data || [])
+      .filter((h: any) => h.status === 'Approved' && (todayOnly ? h.date === today : h.date >= today));
     setHolidays(upcoming);
     setIndex(0);
     setLoading(false);
-  }, [tenant?.id]);
+  }, [tenant?.id, profile?.outlet_id, todayOnly]);
 
   useEffect(() => { fetchHolidays(); }, [fetchHolidays]);
 
   if (!tenant) return null;
+  if (todayOnly && (loading || holidays.length === 0)) return null;
 
   const current = holidays[index];
   const theme = getHolidayTheme(current?.name);

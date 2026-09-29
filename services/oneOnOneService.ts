@@ -2,8 +2,8 @@ import { supabase } from '@/lib/supabase';
 
 const SELECT = `
   *,
-  organizer:profiles!one_on_ones_organizer_id_fkey(id, first_name, middle_name, last_name),
-  participant:profiles!one_on_ones_participant_id_fkey(id, first_name, middle_name, last_name)
+  organizer:profile_directory!one_on_ones_organizer_id_fkey(id, first_name, middle_name, last_name),
+  participant:profile_directory!one_on_ones_participant_id_fkey(id, first_name, middle_name, last_name)
 `;
 
 /** Meetings where the caller is either the organizer or the participant. */

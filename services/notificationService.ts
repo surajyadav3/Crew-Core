@@ -1,12 +1,18 @@
 import { supabase } from '@/lib/supabase';
 
-export async function listMyNotifications(profileId: string) {
-  const { data, error } = await supabase
+// Birthdays / work anniversaries are website-only — the app never shows them.
+const hideCelebrations = (q: any) => q.not('type', 'ilike', 'birthday%').not('type', 'ilike', '%anniversar%');
+
+/** `excludeTypes` filters server-side (e.g. Raniwala's Home drops policy notices), so the limit still returns real updates. */
+export async function listMyNotifications(profileId: string, { excludeTypes = [], limit = 50 }: { excludeTypes?: string[]; limit?: number } = {}) {
+  let query = hideCelebrations(supabase
     .from('app_notifications')
     .select('*')
-    .eq('profile_id', profileId)
+    .eq('profile_id', profileId));
+  if (excludeTypes.length) query = query.not('type', 'in', `(${excludeTypes.join(',')})`);
+  const { data, error } = await query
     .order('created_at', { ascending: false })
-    .limit(50);
+    .limit(limit);
   return { data: data || [], error };
 }
 
@@ -19,11 +25,11 @@ export async function markNotificationRead(id: string) {
 }
 
 export async function countUnreadNotifications(profileId: string) {
-  const { count, error } = await supabase
+  const { count, error } = await hideCelebrations(supabase
     .from('app_notifications')
     .select('id', { count: 'exact', head: true })
     .eq('profile_id', profileId)
-    .eq('is_read', false);
+    .eq('is_read', false));
   return { count: count || 0, error };
 }
 
@@ -64,7 +70,8 @@ export async function notifyProfiles(tenantId: string, profileIds: (string | nul
 export async function notifyRoles(tenantId: string, roles: string[], opts: NotifyOpts, excludeProfileId: string | null = null) {
   if (!tenantId || !roles?.length) return;
 
-  let query = supabase.from('profiles').select('id').eq('tenant_id', tenantId).in('role', roles);
+  // profile_directory, not profiles: employees can only read their own profiles row.
+  let query = supabase.from('profile_directory').select('id').eq('tenant_id', tenantId).in('role', roles);
   if (excludeProfileId) query = query.neq('id', excludeProfileId);
 
   const { data, error } = await query;
@@ -80,7 +87,7 @@ export async function notifyRoles(tenantId: string, roles: string[], opts: Notif
  */
 export async function getRequesterLabel(profileId: string): Promise<string> {
   const { data } = await supabase
-    .from('profiles')
+    .from('profile_directory')
     .select('first_name, middle_name, last_name, outlet_location')
     .eq('id', profileId)
     .maybeSingle();

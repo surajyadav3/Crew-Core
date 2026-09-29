@@ -48,17 +48,40 @@ export const fmt = (n: number, currency = '₹') => {
   }
 };
 
-export const fmtDate = (d: string | null) => {
+export const fmtDate = (d: string | null | undefined) => {
   if (!d) return '—';
+  // Plain YYYY-MM-DD (join_date, DOB) is a calendar date, not an instant —
+  // parse it as local midnight so no timezone can shift it a day.
+  const dt = /^\d{4}-\d{2}-\d{2}$/.test(d) ? new Date(d + 'T00:00:00') : new Date(d);
   try {
-    return new Date(d).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+    return dt.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
   } catch {
-    const dt = new Date(d);
     return `${String(dt.getDate()).padStart(2, '0')} ${MONTHS_SHORT[dt.getMonth()]} ${dt.getFullYear()}`;
   }
 };
 
-export const fmtDateTime = (d: string | null) => {
+/** User-facing people data (names, department, designation…) is always shown in CAPITALS. */
+export const upper = (v: string | null | undefined) => (v || '').toUpperCase();
+
+/** Full name in capitals, skipping missing parts. */
+export const personName = (p: any, fallback = '') =>
+  upper([p?.first_name, p?.middle_name, p?.last_name].filter(Boolean).join(' ')) || fallback;
+
+/**
+ * Probation completes `months` (default 6) after the date of joining.
+ * Returns { completed, endsOn } where endsOn is YYYY-MM-DD, or null without a join date.
+ */
+export function probationInfo(joinDate: string | null | undefined, months?: number | null) {
+  if (!joinDate) return null;
+  const [y, m, d] = joinDate.split('-').map(Number);
+  const end = new Date(y, m - 1 + (months || 6), d);
+  const endsOn = `${end.getFullYear()}-${String(end.getMonth() + 1).padStart(2, '0')}-${String(end.getDate()).padStart(2, '0')}`;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  return { completed: today >= end, endsOn };
+}
+
+export const fmtDateTime = (d: string | null | undefined) => {
   if (!d) return '—';
   try {
     return new Date(d).toLocaleString('en-IN', {
@@ -108,6 +131,55 @@ export const todayStr = () => {
 export const dateStr = (d: Date) =>
   `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 
+/**
+ * Earliest date an employee may still raise a regularize request for —
+ * tenants.regularize_window_days counts today, so the default 2 means today
+ * and yesterday. The DB trigger enforce_regularize_request_window is the real
+ * gate (shared with the website); this just lets the UI hide/explain what the
+ * server would reject.
+ */
+export const regularizeWindowDays = (tenant: any) => Math.max(1, Number(tenant?.regularize_window_days) || 2);
+
+/**
+ * A temporary extended window (tenants.regularize_extended_from/_until, web
+ * repo migration 20260929_2_regularize_extended_window.sql): while today <=
+ * until, any date since `from` may be regularized. Returns null once it has
+ * lapsed, so the normal N-day window comes back on its own. Mirrors the
+ * website's src/lib/helpers.js.
+ */
+export const regularizeExtension = (tenant: any): { from: string; until: string } | null => {
+  const from = tenant?.regularize_extended_from;
+  const until = tenant?.regularize_extended_until;
+  if (!from || !until || todayStr() > until) return null;
+  return { from, until };
+};
+
+const fmtDayMonth = (s: string) => new Date(s + 'T00:00:00').toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
+
+export const regularizeMinDate = (tenant: any) => {
+  const d = new Date();
+  d.setDate(d.getDate() - (regularizeWindowDays(tenant) - 1));
+  const normal = dateStr(d);
+  const ext = regularizeExtension(tenant);
+  return ext && ext.from < normal ? ext.from : normal;
+};
+
+export const regularizeWindowLabel = (tenant: any) => {
+  const ext = regularizeExtension(tenant);
+  if (ext) return `any day from ${fmtDayMonth(ext.from)} to today`;
+  const n = regularizeWindowDays(tenant);
+  return n === 1 ? 'today' : n === 2 ? 'today or yesterday' : `the last ${n} days`;
+};
+
+/** Banner text for the regularize screens while an extended window is open, else null. */
+export const regularizeExtensionNotice = (tenant: any) => {
+  const ext = regularizeExtension(tenant);
+  if (!ext) return null;
+  const month = new Date(ext.from + 'T00:00:00').toLocaleDateString('en-IN', { month: 'long' });
+  const n = regularizeWindowDays(tenant);
+  return `Until ${fmtDayMonth(ext.until)}, you can regularize any day from ${fmtDayMonth(ext.from)} — please submit all your ${month} mispunch / attendance corrections for approval now. After ${fmtDayMonth(ext.until)}, only the last ${n} days can be regularized; older days can no longer be regularized.`;
+};
+
 export const timeStr = (d: Date) =>
   `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 
@@ -129,6 +201,29 @@ export const diffHours = (t1: string, t2: string) => {
   if (mins < 0) mins += 24 * 60;
   return mins / 60;
 };
+
+const EARLY_LATE_THRESHOLD_MINUTES = 90;
+
+/**
+ * Early Left / Late Arrival breach check — a punch-in more than 90 minutes
+ * after shift start, OR a punch-out more than 90 minutes before shift end.
+ * Mirrors src/lib/helpers.js computeEarlyLateBreach exactly, so web, mobile,
+ * and essl-punch can't drift on what counts as a breach.
+ */
+export function computeEarlyLateBreach(firstPunch: string, lastPunch: string, shiftStart: string, shiftEnd: string): boolean {
+  const { lateArrival, earlyLeft } = getEarlyLateBreakdown(firstPunch, lastPunch, shiftStart, shiftEnd);
+  return lateArrival || earlyLeft;
+}
+
+/** Which side of the 90-minute rule a day breached — for labelling a day as Late Arrival and/or Early Left. */
+export function getEarlyLateBreakdown(firstPunch: string, lastPunch: string, shiftStart: string, shiftEnd: string) {
+  if (!firstPunch || !lastPunch || !shiftStart || !shiftEnd) return { lateArrival: false, earlyLeft: false };
+  const toMin = (t: string) => { const [h, m] = t.split(':').map(Number); return h * 60 + m; };
+  return {
+    lateArrival: toMin(firstPunch) > toMin(shiftStart) + EARLY_LATE_THRESHOLD_MINUTES,
+    earlyLeft: toMin(lastPunch) < toMin(shiftEnd) - EARLY_LATE_THRESHOLD_MINUTES,
+  };
+}
 
 export const fmtDuration = (hrs: number) => {
   const h = Math.floor(hrs);
@@ -228,4 +323,30 @@ export function checkGeofenceMulti(punchLat: number | null | undefined, punchLng
 export function geofenceIsConfigured(outlets: any[], tenant: any): boolean {
   if (tenant?.geofence_lat != null && tenant?.geofence_lng != null) return true;
   return !!(outlets || []).some((o) => o?.geofence_lat != null && o?.geofence_lng != null);
+}
+
+/**
+ * An outlet's own `weekly_off_days` (when set) overrides the tenant-wide
+ * setting entirely — e.g. Raniwala's Delhi outlet is off Monday while Office
+ * and Factory are off Sunday. Falls back to the tenant's `weekly_off_days`,
+ * then the legacy single `weekly_off_day` column, then Sunday-only. Mirrors
+ * the website's src/lib/helpers.js getTenantWeeklyOffDays exactly.
+ */
+export function getTenantWeeklyOffDays(tenant: any, outlet: any = null): number[] {
+  if (Array.isArray(outlet?.weekly_off_days) && outlet.weekly_off_days.length > 0) {
+    return outlet.weekly_off_days;
+  }
+  if (Array.isArray(tenant?.weekly_off_days) && tenant.weekly_off_days.length > 0) {
+    return tenant.weekly_off_days;
+  }
+  if (tenant?.weekly_off_day !== undefined && tenant?.weekly_off_day !== null) {
+    return [tenant.weekly_off_day];
+  }
+  return [0];
+}
+
+/** True if `date` falls on one of the effective (outlet ?? tenant) weekly off days. */
+export function isTenantWeeklyOff(date: Date, tenant: any, outlet: any = null): boolean {
+  const offDays = getTenantWeeklyOffDays(tenant, outlet);
+  return offDays.includes(date.getDay());
 }

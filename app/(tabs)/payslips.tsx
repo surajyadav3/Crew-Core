@@ -203,9 +203,9 @@ export default function PayslipsScreen() {
             <View style={s.empCard}>
               <Text style={s.cardSectionTitle}>Employee Details</Text>
               {[
-                { label: 'Name', value: slip.emp_name, icon: 'person-outline' as const },
-                { label: 'Department', value: slip.department || '—', icon: 'briefcase-outline' as const },
-                { label: 'Designation', value: slip.designation || '—', icon: 'ribbon-outline' as const },
+                { label: 'Name', value: (slip.emp_name || '').toUpperCase(), icon: 'person-outline' as const },
+                { label: 'Department', value: (slip.department || '—').toUpperCase(), icon: 'briefcase-outline' as const },
+                { label: 'Designation', value: (slip.designation || '—').toUpperCase(), icon: 'ribbon-outline' as const },
                 { label: 'Days Worked', value: `${slip.work_days} of ${slip.total_work_days}`, icon: 'calendar-outline' as const },
               ].map((item, idx, arr) => (
                 <View key={item.label}>

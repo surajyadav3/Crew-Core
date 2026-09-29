@@ -1,7 +1,10 @@
-import React, { createContext, useContext, useEffect, useState, useCallback, useMemo } from 'react';
+import React, { createContext, useContext, useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { AppState } from 'react-native';
 import { isAuthRetryableFetchError } from '@supabase/supabase-js';
 import { supabase } from '@/lib/supabase';
+import {
+  largeSecureStore, allowSessionRemoval, readSessionBackup, writeSessionBackup, hasStoredValue,
+} from '@/lib/secureStorage';
 import { sendOtp as svcSendOtp, verifyOtp as svcVerifyOtp, resolveLoginEmail } from '@/services/otpService';
 import { registerForPush } from '@/services/pushService';
 import { presentLocalNotification } from '@/lib/pushNotifications';
@@ -14,6 +17,7 @@ type Profile = {
   email: string;
   department?: string;
   designation?: string;
+  join_date?: string;
   ctc?: number;
   tenant_id: string;
   tenants?: Tenant;
@@ -34,11 +38,19 @@ type Tenant = {
   [key: string]: any;
 };
 
+/**
+ * 'unknown' — not loaded yet (or couldn't be loaded, e.g. offline, and nothing cached)
+ * 'ready'   — profile loaded (from the server or the on-device cache)
+ * 'missing' — the server confirmed this account has no profile row yet → /register
+ */
+export type ProfileStatus = 'unknown' | 'ready' | 'missing';
+
 type AuthContextType = {
   user: any;
   profile: Profile | null;
   tenant: Tenant | null;
   loading: boolean;
+  profileStatus: ProfileStatus;
   signIn: (identifier: string, password: string) => Promise<any>;
   signOut: () => Promise<void>;
   refreshProfile: () => Promise<any>;
@@ -48,11 +60,110 @@ type AuthContextType = {
 
 const AuthContext = createContext<AuthContextType>({} as AuthContextType);
 
+// Last successfully loaded profile (with its tenant), encrypted at rest with
+// the same adapter as the session. Lets a returning user land straight in the
+// app — even offline, even before the server answers — like any app that
+// keeps you signed in, instead of a spinner or the register screen.
+const PROFILE_CACHE_KEY = 'crewcore-profile-cache';
+
+async function loadCachedProfile(userId: string): Promise<Profile | null> {
+  try {
+    const raw = await largeSecureStore.getItem(PROFILE_CACHE_KEY);
+    const cached = raw ? JSON.parse(raw) : null;
+    return cached?.id === userId ? cached : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveCachedProfile(p: Profile | null) {
+  const op = p ? largeSecureStore.setItem(PROFILE_CACHE_KEY, JSON.stringify(p)) : largeSecureStore.removeItem(PROFILE_CACHE_KEY);
+  op.catch((err) => console.warn('[CrewCore] profile cache write skipped:', err));
+}
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * The saved session straight from storage — no network, no refresh. When a
+ * session IS saved but can't be decrypted right now (Keychain/Keystore read
+ * hiccup), the read is retried briefly before giving up. A readable session
+ * also refreshes the refresh-token backup (covers installs saved before the
+ * backup existed).
+ */
+async function readStoredSession(): Promise<any | null> {
+  const storageKey = (supabase.auth as any).storageKey as string;
+  for (const wait of [0, 300, 1000]) {
+    if (wait) {
+      if (!(await hasStoredValue(storageKey))) return null;
+      await sleep(wait);
+    }
+    try {
+      const raw = await largeSecureStore.getItem(storageKey);
+      const stored = raw ? JSON.parse(raw) : null;
+      if (stored?.user?.id && stored?.refresh_token) {
+        writeSessionBackup(raw!);
+        return stored;
+      }
+    } catch {
+      // fall through to the next attempt
+    }
+  }
+  return null;
+}
+
+type RestoreResult =
+  | { status: 'none' }
+  | { status: 'restored'; user: any }
+  | { status: 'offline'; userId: string }
+  | { status: 'rejected'; message: string };
+
+/**
+ * The saved session couldn't be read at all — sign back in silently with the
+ * backed-up refresh token (see secureStorage rule 6). supabase-js saves the
+ * new session and emits TOKEN_REFRESHED on success.
+ */
+async function restoreFromBackup(): Promise<RestoreResult> {
+  const backup = await readSessionBackup();
+  if (!backup) return { status: 'none' };
+  try {
+    const { data, error } = await supabase.auth.refreshSession({ refresh_token: backup.refreshToken });
+    if (data?.session?.user) return { status: 'restored', user: data.session.user };
+    if (!error || isAuthRetryableFetchError(error)) return { status: 'offline', userId: backup.userId };
+    return { status: 'rejected', message: error.message };
+  } catch {
+    return { status: 'offline', userId: backup.userId };
+  }
+}
+
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<any>(null);
   const [profile, setProfile] = useState<Profile | null>(null);
   const [tenant, setTenant] = useState<Tenant | null>(null);
   const [loading, setLoading] = useState(true);
+  const [profileStatus, setProfileStatus] = useState<ProfileStatus>('unknown');
+
+  // Who the app currently considers signed in — lets a slow fetchProfile()
+  // drop its result if the user changed meanwhile, without calling getSession()
+  // (which needs the network to refresh an expired token, so it "failed" the
+  // guard whenever the phone was offline).
+  const userIdRef = useRef<string | null>(null);
+  // True only while the user themselves is signing out — any other SIGNED_OUT
+  // event is treated as "re-check", not "log out".
+  const explicitSignOutRef = useRef(false);
+  const validatingRef = useRef<Promise<void> | null>(null);
+
+  const applyUser = useCallback((u: any | null) => {
+    userIdRef.current = u?.id ?? null;
+    setUser(u);
+  }, []);
+
+  const clearLocalState = useCallback(() => {
+    userIdRef.current = null;
+    setUser(null);
+    setProfile(null);
+    setTenant(null);
+    setProfileStatus('unknown');
+  }, []);
 
   const fetchProfile = useCallback(async (userId: string) => {
     if (!userId) return null;
@@ -63,145 +174,211 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         .eq('id', userId)
         .maybeSingle();
 
-      if (error) { console.error('fetchProfile error:', error.message); return null; }
-
-      const { data: { session: current } } = await supabase.auth.getSession();
-      if (current?.user?.id !== userId) return null;
+      // A failed fetch (offline, timeout) keeps whatever profile we already
+      // have — it must never look like "this account has no profile".
+      if (error) { console.warn('fetchProfile error:', error.message); return null; }
+      if (userIdRef.current !== userId) return null;
 
       if (data) {
         setProfile(data);
         setTenant(data.tenants);
+        setProfileStatus('ready');
+        saveCachedProfile(data);
       } else {
         setProfile(null);
         setTenant(null);
+        setProfileStatus('missing');
       }
       return data;
     } catch (err) {
-      console.error('fetchProfile exception:', err);
+      console.warn('fetchProfile exception:', err);
       return null;
     }
   }, []);
 
+  /** Sign out for real: clears the saved session, the profile cache and state. */
+  const hardSignOut = useCallback(async (reason: string) => {
+    console.warn('[CrewCore] signing out:', reason);
+    explicitSignOutRef.current = true;
+    try {
+      await allowSessionRemoval(() => supabase.auth.signOut({ scope: 'local' }));
+    } catch (err) {
+      console.error('[CrewCore] local sign-out error:', err);
+    } finally {
+      explicitSignOutRef.current = false;
+      saveCachedProfile(null);
+      clearLocalState();
+    }
+  }, [clearLocalState]);
+
+  /**
+   * Confirms the saved session with the server (refreshing it if expired).
+   * Only a definite rejection from the auth server signs the user out; a
+   * network problem keeps them signed in and is retried on the next resume.
+   * A first rejection is re-checked once after a short pause: if another JS
+   * runtime (the background task) rotated the refresh token a moment ago, the
+   * fresh one is in storage by then and the retry succeeds.
+   */
+  const validateSession = useCallback(() => {
+    if (validatingRef.current) return validatingRef.current;
+    const run = (async () => {
+      for (let attempt = 1; attempt <= 6; attempt++) {
+        const { data: { session }, error } = await supabase.auth.getSession();
+        if (session?.user) {
+          applyUser(session.user);
+          await fetchProfile(session.user.id);
+          return;
+        }
+        const stored = await readStoredSession();
+        if (!stored) {
+          // The saved session is gone or unreadable — try the refresh-token
+          // backup before treating the user as signed out.
+          const restored = await restoreFromBackup();
+          if (restored.status === 'restored') {
+            applyUser(restored.user);
+            await fetchProfile(restored.user.id);
+            return;
+          }
+          if (restored.status === 'none') {
+            // Nothing saved at all (never signed in, or signed out on this
+            // device) — genuinely signed out.
+            if (userIdRef.current) clearLocalState();
+            return;
+          }
+          if (restored.status === 'offline') {
+            // Can't reach the server — stay signed in and retry.
+            if (attempt === 6) return;
+            await sleep(Math.min(1000 * 2 ** (attempt - 1), 8000));
+            continue;
+          }
+          // The server refused the backed-up refresh token.
+          if (attempt === 1) { await sleep(1500); continue; }
+          await hardSignOut(`session rejected by server: ${restored.message}`);
+          return;
+        }
+        if (!error || isAuthRetryableFetchError(error)) {
+          // Offline / flaky network, or storage briefly unreadable — stay
+          // signed in, back off, and try again.
+          if (attempt === 6) return;
+          await sleep(Math.min(1000 * 2 ** (attempt - 1), 8000));
+          continue;
+        }
+        // The server answered and refused the refresh token.
+        if (attempt === 1) { await sleep(1500); continue; }
+        await hardSignOut(`session rejected by server: ${error.message}`);
+        return;
+      }
+    })().finally(() => { validatingRef.current = null; });
+    validatingRef.current = run;
+    return run;
+  }, [applyUser, fetchProfile, hardSignOut, clearLocalState]);
+
   useEffect(() => {
     let mounted = true;
 
-    // A cold-launch getSession() that needs to refresh an expired token requires
-    // a real network round-trip, and phones routinely reopen an app in the first
-    // second or two of reconnecting Wi-Fi/cell after being locked — exactly when
-    // that request is most likely to fail with a transient network error. This
-    // was the actual auto-logout bug: supabase-js's getSession() doesn't throw on
-    // a failed refresh, it *resolves* with `{ session: null, error }` once its own
-    // internal retry/cooldown gives up — including for a plain network blip, not
-    // just a genuinely dead refresh token. The old code only checked `session`,
-    // never `error`, so it read that resolved null as "logged out" and never
-    // tried again, stranding the user on the login screen for the rest of that
-    // app session even though nothing about their login had actually expired.
-    // Retrying here (and only for retryable errors — isAuthRetryableFetchError
-    // excludes a genuinely invalid/expired refresh token) keeps the user signed
-    // in through exactly the kind of blip that was causing this.
-    const getSessionWithRetry = async (attempt = 1): Promise<{ session: any }> => {
-      const { data: { session }, error } = await supabase.auth.getSession();
-      if (session || !error) return { session };
-      if (isAuthRetryableFetchError(error) && attempt < 5) {
-        await new Promise((resolve) => setTimeout(resolve, Math.min(1000 * 2 ** (attempt - 1), 8000)));
-        return getSessionWithRetry(attempt + 1);
-      }
-      throw error;
-    };
+    // Only the visible app owns the refresh ticker (see lib/supabase.ts).
+    if (AppState.currentState === 'active') supabase.auth.startAutoRefresh();
 
     const init = async () => {
-      // Generous on purpose: after the app has been closed for days the stored
-      // access token is guaranteed expired, so getSession() has to do a real
-      // network round-trip to refresh it before resolving. A short timeout here
-      // races ahead of that refresh on a slow connection and flashes the user
-      // to the login screen even though their session is still valid. This is
-      // purely a UI fallback (so the spinner doesn't hang forever) — it doesn't
-      // touch `user`, so if the retrying getSession() above succeeds after this
-      // fires, login.tsx's own effect still redirects the user straight back in.
-      const timeoutId = setTimeout(() => { if (mounted) setLoading(false); }, 20000);
-      try {
-        const { session } = await getSessionWithRetry();
+      // 1. Instant: restore the saved session + cached profile with no network,
+      //    so a returning user lands straight in the app.
+      const stored = await readStoredSession();
+      if (!mounted) return;
+      let startUser = stored?.user ?? null;
+      if (!stored) {
+        // Session unreadable — restore it from the refresh-token backup before
+        // showing anything. Offline (or no answer within 8s): show the app
+        // from the cached profile and let validateSession() keep retrying.
+        // Only user.id is read from `user` anywhere in the app, and the real
+        // user object replaces this stand-in once the session is restored.
+        const restored = await Promise.race([
+          restoreFromBackup(),
+          sleep(8000).then(async (): Promise<RestoreResult> => {
+            const backup = await readSessionBackup();
+            return backup ? { status: 'offline', userId: backup.userId } : { status: 'none' };
+          }),
+        ]);
         if (!mounted) return;
-        if (session?.user) {
-          setUser(session.user);
-          await fetchProfile(session.user.id);
-        }
-      } catch (err) {
-        console.error('[CrewCore] Auth init error (giving up after retries):', err);
-      } finally {
-        clearTimeout(timeoutId);
-        if (mounted) setLoading(false);
+        if (restored.status === 'restored') startUser = restored.user;
+        else if (restored.status === 'offline') startUser = { id: restored.userId };
       }
+      if (startUser) {
+        applyUser(startUser);
+        const cached = await loadCachedProfile(startUser.id);
+        if (!mounted) return;
+        if (cached) {
+          setProfile(cached);
+          setTenant(cached.tenants ?? null);
+          setProfileStatus('ready');
+        }
+      }
+      setLoading(false);
+
+      // 2. In the background: confirm with the server and refresh the profile.
+      await validateSession();
     };
 
-    init().catch((err) => console.error('[CrewCore] Auth init unhandled:', err));
+    init().catch((err) => {
+      console.error('[CrewCore] Auth init error:', err);
+      if (mounted) setLoading(false);
+    });
 
-    // Supabase's own React Native guidance: don't call supabase.auth.* methods
-    // synchronously from inside the onAuthStateChange callback — the auth
-    // client can still be holding an internal lock while dispatching the
-    // event, and fetchProfile calls supabase.auth.getSession(), so doing it
-    // inline risks the callback hanging forever (loading never clears, every
-    // gated screen stuck on its spinner). Deferring via setTimeout avoids
-    // that, while still being `await`ed here so callers below can keep
-    // `loading` true until the deferred fetch actually resolves, not just
-    // until this handler returns.
-    const deferredFetchProfile = (userId: string) =>
-      new Promise<void>((resolve) => {
-        setTimeout(() => {
-          (mounted ? fetchProfile(userId) : Promise.resolve())
-            .catch((e) => console.error('[CrewCore] fetchProfile error:', e))
-            .finally(resolve);
-        }, 0);
-      });
-
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
+    // Don't call supabase.auth.* synchronously inside onAuthStateChange — the
+    // auth client can still hold its internal lock while dispatching, so work
+    // is deferred with setTimeout.
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
       if (!mounted) return;
-      try {
-        if (event === 'SIGNED_IN') {
-          if (session?.user) {
-            // Keep `loading` true until the profile fetch settles — screens
-            // like login.tsx redirect the instant `user` is truthy, and
-            // without this they briefly route on a stale null `profile`
-            // (flashing the "I am a Founder / HR" workspace picker) before
-            // self-correcting once the fetch actually resolves.
-            setLoading(true);
-            setUser(session.user);
-            await deferredFetchProfile(session.user.id);
+      setTimeout(async () => {
+        if (!mounted) return;
+        // Only the fresh-login path below flips `loading` on, so only it
+        // flips it off. INITIAL_SESSION used to end `loading` here before
+        // init() had restored the saved user — a flash of the login screen.
+        let startedLoading = false;
+        try {
+          if (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED' || event === 'USER_UPDATED') {
+            if (!session?.user) return;
+            const isNewUser = userIdRef.current !== session.user.id;
+            applyUser(session.user);
+            if (isNewUser) {
+              // Fresh login: keep `loading` true until the profile settles so
+              // login.tsx doesn't route on a stale null profile.
+              startedLoading = true;
+              setLoading(true);
+              setProfileStatus('unknown');
+              await fetchProfile(session.user.id);
+            } else if (event === 'TOKEN_REFRESHED') {
+              fetchProfile(session.user.id);
+            }
+          } else if (event === 'SIGNED_OUT') {
+            if (explicitSignOutRef.current) {
+              clearLocalState();
+            } else {
+              // supabase-js gave up on a refresh — re-check instead of
+              // dropping the user to the login screen.
+              validateSession();
+            }
           }
-        } else if (event === 'TOKEN_REFRESHED') {
-          if (session?.user) {
-            setUser(session.user);
-            await deferredFetchProfile(session.user.id);
-          }
-        } else if (event === 'SIGNED_OUT') {
-          setUser(null);
-          setProfile(null);
-          setTenant(null);
+        } catch (err) {
+          console.error('[CrewCore] Auth state change error:', err);
+        } finally {
+          if (mounted && startedLoading) setLoading(false);
         }
-      } catch (err) {
-        console.error('[CrewCore] Auth state change error:', err);
-      } finally {
-        if (mounted) setLoading(false);
-      }
+      }, 0);
     });
 
     return () => { mounted = false; subscription.unsubscribe(); };
-  }, [fetchProfile]);
+  }, [applyUser, fetchProfile, validateSession, clearLocalState]);
 
-  // Resync profile/tenant on foreground resume. The realtime channels below
-  // (leave-status, geofence) ride a websocket the OS suspends while
-  // backgrounded, so a change made elsewhere during that time — a role
-  // change, a leave decision, an admin edit — doesn't arrive as an event once
-  // the socket reconnects. Re-fetching on 'active' instead of waiting for the
-  // next sign-in makes reopening the app after any length of time behave the
-  // same as a fresh load: whatever's true on the server right now.
+  // On every return to the foreground: re-confirm the session (catches up after
+  // being offline) and resync the profile. The realtime channels below ride a
+  // websocket the OS suspends while backgrounded, so changes made meanwhile
+  // (role, leave decision, admin edit) only arrive through this refetch.
   useEffect(() => {
-    if (!user?.id) return;
     const sub = AppState.addEventListener('change', (state) => {
-      if (state === 'active') fetchProfile(user.id);
+      if (state === 'active' && userIdRef.current) validateSession();
     });
     return () => sub.remove();
-  }, [user?.id, fetchProfile]);
+  }, [validateSession]);
 
   // Register this device for push notifications once we know who's signed in.
   useEffect(() => {
@@ -266,17 +443,27 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return data;
   }, []);
 
+  // User tapped Sign out. Tries to end the session server-side too, but the
+  // local session is always cleared — previously an offline sign-out left it
+  // saved (supabase-js skips local removal when the server call fails), so the
+  // user was silently signed back in on the next launch.
   const signOut = useCallback(async () => {
+    explicitSignOutRef.current = true;
     try {
-      await supabase.auth.signOut();
+      await allowSessionRemoval(async () => {
+        // scope 'local' revokes only this device's session server-side — the
+        // default ('global') also killed the same account's website sessions.
+        await supabase.auth.signOut({ scope: 'local' }).catch((err) => console.warn('[CrewCore] server sign-out failed:', err));
+        await supabase.auth.signOut({ scope: 'local' });
+      });
     } catch (err) {
-      console.error('[CrewCore] signOut error (clearing local session anyway):', err);
+      console.error('[CrewCore] signOut error (clearing local state anyway):', err);
     } finally {
-      setUser(null);
-      setProfile(null);
-      setTenant(null);
+      explicitSignOutRef.current = false;
+      saveCachedProfile(null);
+      clearLocalState();
     }
-  }, []);
+  }, [clearLocalState]);
 
   const refreshProfile = useCallback(() => {
     if (user?.id) return fetchProfile(user.id);
@@ -291,9 +478,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   );
 
   const value = useMemo(() => ({
-    user, profile, tenant, loading,
+    user, profile, tenant, loading, profileStatus,
     signIn, signOut, refreshProfile, sendOtp, verifyOtp,
-  }), [user, profile, tenant, loading, signIn, signOut, refreshProfile, sendOtp, verifyOtp]);
+  }), [user, profile, tenant, loading, profileStatus, signIn, signOut, refreshProfile, sendOtp, verifyOtp]);
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }

@@ -16,7 +16,8 @@ export const supabase = createClient(
   {
     auth: {
       storage: largeSecureStore,
-      autoRefreshToken: true,
+      // false on purpose — see "Token refresh ownership" below.
+      autoRefreshToken: false,
       persistSession: true,
       detectSessionInUrl: false,
     },
@@ -24,6 +25,15 @@ export const supabase = createClient(
   }
 );
 
+// Token refresh ownership: with autoRefreshToken: true, supabase-js on React
+// Native starts its refresh ticker (and refreshes an expired token) the moment
+// the client is created — in EVERY JS runtime, including the headless one the
+// OS spins up for the Live Tracking background task. That runtime then raced
+// the visible app over the same single-use refresh token, which Supabase
+// rejects/revokes, logging the user out. Now only the visible app runs the
+// ticker (AppState 'active' below + AuthProvider on mount); any runtime still
+// refreshes on demand if it makes a request with an expired token.
+//
 // Supabase's token auto-refresh runs on a JS timer, which the OS freezes while
 // the app is backgrounded. Without this, the access token silently expires
 // while the app is in the background and the user gets bounced back to the

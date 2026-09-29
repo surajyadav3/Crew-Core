@@ -12,14 +12,19 @@ import { useFeatures } from '@/context/FeatureContext';
 import { useClockInOut } from '@/hooks/useClockInOut';
 import { fetchMyMonthAttendance } from '@/services/attendanceService';
 import { listHolidays } from '@/services/holidayService';
+import { getOutlet } from '@/services/tenantService';
 import { listMyNotifications, markNotificationRead } from '@/services/notificationService';
 import { fetchMyAdvanceBalance } from '@/services/advanceService';
+import { fetchMyLeaveBalances } from '@/services/leaveLedgerService';
 import { showToast } from '@/components/Toast';
 import HolidayBanner from '@/components/HolidayBanner';
 import AnnouncementBanner from '@/components/AnnouncementBanner';
+import AnnouncementsSection from '@/components/AnnouncementsSection';
+import CelebrationsCard from '@/components/CelebrationsCard';
+import LeaveBalanceCard, { pickEarnedBalance } from '@/components/LeaveBalanceCard';
 import { MORE_TOOLS } from '@/constants/MoreTools';
 import {
-  dateStr, fmtHMS, monthLabel, fmtTime12, fmtDate, fmt,
+  dateStr, fmtHMS, monthLabel, fmtTime12, fmtDate, fmt, isTenantWeeklyOff, personName, upper, isRaniwalaTenant,
 } from '@/lib/helpers';
 import { Colors as C } from '@/constants/Colors';
 
@@ -31,6 +36,10 @@ const UPDATE_ICON: Record<string, keyof typeof Ionicons.glyphMap> = {
   clock_in: 'log-in-outline',
   clock_out: 'log-out-outline',
 };
+
+// Raniwala's Updates feed: announcements have their own section at the top
+// and policies live only on the Policies screen (same as its website).
+const RANIWALA_HIDDEN_UPDATE_TYPES = ['policy', 'policy_ack', 'announcement'];
 
 const { width: SCREEN_W } = Dimensions.get('window');
 
@@ -136,12 +145,19 @@ export default function DashboardScreen() {
   const { isEnabled } = useFeatures();
   const router = useRouter();
   const clock = useClockInOut();
+  const raniwala = isRaniwalaTenant(tenant);
+  // Raniwala: everyone sees their own branch's holidays (listHolidays scopes
+  // to profile.outlet_id + company-wide). Only managers / HODs get their
+  // team's birthdays / anniversaries, today only (the RPC enforces both);
+  // HR sees the 5-day list on the website, not in the app.
+  const showCelebrations = raniwala && ['manager', 'hod'].includes(profile?.role || '');
 
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [summary, setSummary] = useState({ present: 0, absent: 0, late: 0, totalHours: 0 });
+  const [summary, setSummary] = useState({ present: 0, absent: 0, late: 0, mispunch: 0, totalHours: 0 });
   const [updates, setUpdates] = useState<any[]>([]);
   const [advanceBalance, setAdvanceBalance] = useState(0);
+  const [leaveBalances, setLeaveBalances] = useState<any[]>([]);
   const headerFade = useRef(new Animated.Value(0)).current;
 
   const now = new Date();
@@ -149,19 +165,23 @@ export default function DashboardScreen() {
   const loadData = useCallback(async () => {
     if (!profile || !tenant) return;
     try {
-      const [{ data, error }, { data: holidays, error: holErr }, advRes] = await Promise.all([
+      const [{ data, error }, { data: holidays, error: holErr }, advRes, { data: myOutlet }, balRes] = await Promise.all([
         fetchMyMonthAttendance(profile.id, now.getFullYear(), now.getMonth()),
-        listHolidays(tenant.id),
+        listHolidays(tenant.id, profile.outlet_id),
         fetchMyAdvanceBalance(profile.id),
+        getOutlet(profile.outlet_id),
+        fetchMyLeaveBalances(profile.id),
       ]);
+      if (!balRes.error) setLeaveBalances(balRes.data);
       if (error) { showToast('Could not load attendance summary.', 'error'); return; }
       if (holErr) showToast('Could not load holidays.', 'error');
       setAdvanceBalance(advRes.total || 0);
 
-      let present = 0, absent = 0, late = 0, totalHours = 0;
+      let present = 0, absent = 0, late = 0, mispunch = 0, totalHours = 0;
       for (let d = 1; d <= new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate(); d++) {
         const date = new Date(now.getFullYear(), now.getMonth(), d);
-        if (date > now || date.getDay() === 0 || date.getDay() === 6) continue;
+        // Outlet weekly offs (e.g. Delhi off Monday), not a hardcoded Sat/Sun.
+        if (date > now || isTenantWeeklyOff(date, tenant, myOutlet)) continue;
         const ds = dateStr(date);
         if ((holidays || []).find((h: any) => h.date === ds && h.status === 'Approved')) continue;
         const rec = data.find((r: any) => r.date === ds);
@@ -169,13 +189,14 @@ export default function DashboardScreen() {
         if (rec.status === 'Present') present++;
         else if (rec.status === 'Late') { present++; late++; }
         else if (rec.status === 'Absent') absent++;
+        else if (rec.status === 'Mispunch') mispunch++;
         // Today's total_hours only gets (re)written on clock-out, so while
         // still clocked in it excludes whatever's been worked so far — skip
         // it here and let the render below add today's live-ticking total
         // instead, so the month total doesn't look frozen mid-shift.
         if (d !== now.getDate()) totalHours += rec.total_hours || 0;
       }
-      setSummary({ present, absent, late, totalHours });
+      setSummary({ present, absent, late, mispunch, totalHours });
     } catch (err) {
       console.error('[CrewCore] Dashboard loadData error:', err);
       showToast('Could not load attendance summary.', 'error');
@@ -184,10 +205,13 @@ export default function DashboardScreen() {
 
   const loadUpdates = useCallback(async () => {
     if (!profile) return;
-    const { data, error } = await listMyNotifications(profile.id);
-    if (error) { showToast('Could not load announcements.', 'error'); return; }
-    setUpdates(data.slice(0, 5));
-  }, [profile]);
+    const { data, error } = await listMyNotifications(profile.id, {
+      excludeTypes: raniwala ? RANIWALA_HIDDEN_UPDATE_TYPES : [],
+      limit: 5,
+    });
+    if (error) { showToast('Could not load updates.', 'error'); return; }
+    setUpdates(data);
+  }, [profile, raniwala]);
 
   const loadAll = useCallback(async () => {
     setLoading(true);
@@ -206,6 +230,7 @@ export default function DashboardScreen() {
   }, [loadData, loadUpdates]);
 
   const handleOpenUpdate = async (n: any) => {
+    if (n.type === 'verification_request_submitted') router.push('/team-verification' as any);
     if (n.is_read) return;
     const { error } = await markNotificationRead(n.id);
     if (error) return;
@@ -243,7 +268,22 @@ export default function DashboardScreen() {
   ].filter((a) => isEnabled(a.featureKey));
 
   const visibleTools = MORE_TOOLS.filter((t) => isEnabled(t.featureKey));
+
+  // Raniwala: only what an employee acts on day to day — clocking in/out is
+  // already on the Today card and Profile has its own tab.
+  const RANIWALA_ACTIONS = [
+    { label: 'My Attendance', icon: 'calendar-clear-outline' as const, color: C.primary, bg: C.primaryBg, route: '/attendance', featureKey: 'attendance' },
+    { label: 'Request Leave', icon: 'calendar-outline' as const, color: C.teal, bg: C.tealBg, route: '/leaves', featureKey: 'leave_requests' },
+    { label: 'Regularize', icon: 'calendar-number-outline' as const, color: C.rose, bg: C.roseBg, route: '/requests', featureKey: 'regularize_attendance' },
+    { label: 'My Payslips', icon: 'document-text-outline' as const, color: C.success, bg: C.successBg, route: '/payslips', featureKey: 'payslips' },
+    { label: 'Policies', icon: 'reader-outline' as const, color: C.amber, bg: C.amberBg, route: '/notices?tab=policies', featureKey: 'policies' },
+    ...(performanceEnabled ? [{ label: 'Performance', icon: 'ribbon-outline' as const, color: C.primaryDark, bg: '#DDD6FE', route: '/performance', featureKey: null }] : []),
+    ...(visibleTools.length ? [{ label: 'More Tools', icon: 'apps-outline' as const, color: C.purple, bg: '#EDE9FE', route: '/more', featureKey: null }] : []),
+  ].filter((a) => isEnabled(a.featureKey));
+  const quickActions = raniwala ? RANIWALA_ACTIONS : QUICK_ACTIONS;
   const showAdvanceCard = isEnabled('advances_loans');
+  const showLeaveWallet = isEnabled('leave_requests')
+    && (isRaniwalaTenant(tenant) || leaveBalances.some((b) => /earned/i.test(b.leave_type?.name || '')));
 
   const initials = [profile?.first_name?.[0], profile?.last_name?.[0]].filter(Boolean).join('').toUpperCase() || '?';
 
@@ -262,13 +302,13 @@ export default function DashboardScreen() {
           <View style={s.heroRow}>
             <View style={s.heroLeft}>
               <Text style={s.heroGreeting}>{greeting()} 👋</Text>
-              <Text style={s.heroName} numberOfLines={1}>
-                {profile?.first_name || 'there'} {profile?.last_name || ''}
+              <Text style={s.heroName} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.7}>
+                {personName(profile, 'THERE')}{profile?.employee_id ? ` (${profile.employee_id})` : ''}
               </Text>
               {tenant && (
                 <View style={s.heroBadge}>
                   <Ionicons name="business-outline" size={11} color="rgba(255,255,255,0.7)" />
-                  <Text style={s.heroBadgeText}>{tenant.company_name}</Text>
+                  <Text style={s.heroBadgeText}>{upper(tenant.company_name)}</Text>
                 </View>
               )}
             </View>
@@ -293,6 +333,9 @@ export default function DashboardScreen() {
           <HomeSkeleton />
         ) : (
           <>
+            {/* ── Announcements first (Raniwala — mirrors its website Home) ── */}
+            {raniwala && <AnnouncementsSection />}
+
             {/* ── Today's Status Card ─────────────────────────────────── */}
             <AnimatedCard delay={100} style={s.todayCard}>
               <View style={s.todayCardInner}>
@@ -386,7 +429,9 @@ export default function DashboardScreen() {
                 {[
                   { val: summary.present, label: 'Present', color: C.success, bg: C.successBg, icon: 'checkmark-circle' as const },
                   { val: summary.absent, label: 'Absent', color: C.danger, bg: C.dangerBg, icon: 'close-circle' as const },
-                  { val: summary.late, label: 'Late', color: C.warning, bg: C.warningBg, icon: 'alert-circle' as const },
+                  summary.mispunch > 0
+                    ? { val: summary.mispunch, label: 'Mispunch', color: '#DB2777', bg: '#FCE7F3', icon: 'finger-print' as const }
+                    : { val: summary.late, label: 'Late', color: C.warning, bg: C.warningBg, icon: 'alert-circle' as const },
                   { val: fmtHMS(summary.totalHours * 3600 + clock.timerSeconds), label: 'Hours', color: C.primary, bg: C.primaryBg, icon: 'timer-outline' as const },
                 ].map((item) => (
                   <TouchableOpacity
@@ -404,6 +449,18 @@ export default function DashboardScreen() {
                 ))}
               </View>
             </AnimatedCard>
+
+            {/* ── Leave Wallet ─────────────────────────────────────────── */}
+            {showLeaveWallet && (
+              <AnimatedCard delay={225}>
+                <Text style={s.sectionLabel}>My Leaves</Text>
+                <LeaveBalanceCard
+                  earned={pickEarnedBalance(leaveBalances)}
+                  compOff={profile?.comp_off_balance || 0}
+                  onPress={() => router.push('/leaves' as any)}
+                />
+              </AnimatedCard>
+            )}
           </>
         )}
 
@@ -411,7 +468,7 @@ export default function DashboardScreen() {
         <AnimatedCard delay={250}>
           <Text style={s.sectionLabel}>Quick Actions</Text>
           <View style={s.actionsGrid}>
-            {QUICK_ACTIONS.map((item, idx) => (
+            {quickActions.map((item) => (
               <TouchableOpacity
                 key={item.label}
                 style={s.actionCard}
@@ -430,13 +487,17 @@ export default function DashboardScreen() {
           </View>
         </AnimatedCard>
 
-        {/* ── Announcements banner ────────────────────────────────────── */}
-        <AnnouncementBanner />
+        {/* ── Announcements banner (Raniwala has its own section at the top) ── */}
+        {!raniwala && <AnnouncementBanner />}
 
-        {/* ── Announcements & Updates ──────────────────────────────────── */}
+        {/* ── Branch holidays; today's team birthdays for manager / HOD (Raniwala) ── */}
+        {raniwala && <HolidayBanner />}
+        {showCelebrations && <CelebrationsCard todayOnly />}
+
+        {/* ── Updates ──────────────────────────────────────────────────── */}
         <AnimatedCard delay={300}>
           <View style={s.sectionHeaderRow}>
-            <Text style={[s.sectionLabel, { marginTop: 0, paddingHorizontal: 0 }]}>Announcements & Updates</Text>
+            <Text style={[s.sectionLabel, { marginTop: 0, paddingHorizontal: 0 }]}>{raniwala ? 'Updates' : 'Announcements & Updates'}</Text>
             {updates.length > 0 && (
               <TouchableOpacity onPress={() => router.push('/notices' as any)} activeOpacity={0.7}>
                 <Text style={s.seeAllText}>See all</Text>
@@ -446,7 +507,11 @@ export default function DashboardScreen() {
           {updates.length === 0 ? (
             <View style={s.updatesEmpty}>
               <Ionicons name="notifications-outline" size={22} color={C.muted} />
-              <Text style={s.updatesEmptyText}>You're all caught up. New policies, announcements and approvals will show up here.</Text>
+              <Text style={s.updatesEmptyText}>
+                {raniwala
+                  ? "You're all caught up. Approvals and other updates will show up here."
+                  : "You're all caught up. New policies, announcements and approvals will show up here."}
+              </Text>
             </View>
           ) : (
             <View style={s.updatesList}>
@@ -473,10 +538,10 @@ export default function DashboardScreen() {
         </AnimatedCard>
 
         {/* ── Holidays (lower priority — informational, not actionable) ──── */}
-        <HolidayBanner />
+        {!raniwala && <HolidayBanner />}
 
-        {/* ── More Tools ───────────────────────────────────────────────── */}
-        <AnimatedCard delay={350}>
+        {/* ── More Tools (Raniwala reaches these via Quick Actions) ──────── */}
+        {!raniwala && <AnimatedCard delay={350}>
             <View style={s.sectionHeaderRow}>
               <Text style={[s.sectionLabel, { marginTop: 0, paddingHorizontal: 0 }]}>More Tools</Text>
               <TouchableOpacity onPress={() => router.push('/more' as any)} activeOpacity={0.7}>
@@ -484,7 +549,7 @@ export default function DashboardScreen() {
               </TouchableOpacity>
             </View>
 
-            <View style={s.moreStatsRow}>
+            {(showAdvanceCard || !showLeaveWallet) && <View style={s.moreStatsRow}>
               {showAdvanceCard && (
                 <View style={s.moreStatCard}>
                   <View style={[s.moreStatIconWrap, { backgroundColor: C.dangerBg }]}>
@@ -494,14 +559,17 @@ export default function DashboardScreen() {
                   <Text style={s.moreStatVal}>{fmt(advanceBalance)}</Text>
                 </View>
               )}
-              <TouchableOpacity style={s.moreStatCard} onPress={() => router.push('/more' as any)} activeOpacity={0.85}>
-                <View style={[s.moreStatIconWrap, { backgroundColor: C.tealBg }]}>
-                  <Ionicons name="swap-horizontal-outline" size={16} color={C.teal} />
-                </View>
-                <Text style={s.moreStatLabel}>Comp-Off Balance</Text>
-                <Text style={s.moreStatVal}>{profile?.comp_off_balance || 0}</Text>
-              </TouchableOpacity>
-            </View>
+              {/* Comp-off already shows in the Leave Wallet above when it's visible. */}
+              {!showLeaveWallet && (
+                <TouchableOpacity style={s.moreStatCard} onPress={() => router.push('/more' as any)} activeOpacity={0.85}>
+                  <View style={[s.moreStatIconWrap, { backgroundColor: C.tealBg }]}>
+                    <Ionicons name="swap-horizontal-outline" size={16} color={C.teal} />
+                  </View>
+                  <Text style={s.moreStatLabel}>Comp-Off Balance</Text>
+                  <Text style={s.moreStatVal}>{profile?.comp_off_balance || 0}</Text>
+                </TouchableOpacity>
+              )}
+            </View>}
 
             {visibleTools.length > 0 && (
               <View style={s.moreToolsGrid}>
@@ -516,7 +584,7 @@ export default function DashboardScreen() {
                 ))}
               </View>
             )}
-        </AnimatedCard>
+        </AnimatedCard>}
 
       </ScrollView>
     </SafeAreaView>

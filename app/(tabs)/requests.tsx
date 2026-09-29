@@ -12,9 +12,10 @@ import { listMySpecialRequests, submitSpecialRequest } from '@/services/specialR
 import { submitRegularizeRequest, listMyRegularizeRequests } from '@/services/attendanceService';
 import { fetchMyQuota } from '@/services/requestQuotaService';
 import { showToast } from '@/components/Toast';
+import RegularizeExtensionNotice from '@/components/RegularizeExtensionNotice';
 import {
-  todayStr, fmtDate, fmtTime12, fmt,
-  HIGH_SALARY_THRESHOLD, calcPayableOvertimeHours, calcOtPay,
+  todayStr, fmtDate, fmtTime12, fmt, regularizeMinDate, regularizeWindowLabel,
+  HIGH_SALARY_THRESHOLD, calcPayableOvertimeHours, calcOtPay, isRaniwalaTenant,
 } from '@/lib/helpers';
 import { Colors as C } from '@/constants/Colors';
 
@@ -347,6 +348,13 @@ function RegularizeTab({ onOpenModal, onRefresh }: { onOpenModal: (open: () => v
   const [form, setForm] = useState({ ...EMPTY_REG });
   const [saving, setSaving] = useState(false);
   const [quota, setQuota] = useState<Quota | null>(null);
+  // Same rule as the web's MyRegularizeRequestsPage: the self-approval banner
+  // only makes sense when the tenant has regularize auto-approval switched on
+  // (the DB trigger enforce_regularize_request_approval_tier re-derives the
+  // tier from these columns). Raniwala regularizations always go to the
+  // reporting manager, so it never sees the banner.
+  const showQuota = !isRaniwalaTenant(tenant) && tenant?.regularize_auto_approval_enabled === true;
+  const selfLimit = tenant?.regularize_auto_approval_limit ?? null;
 
   const fetchData = useCallback(async () => {
     if (!profile) return;
@@ -376,6 +384,7 @@ function RegularizeTab({ onOpenModal, onRefresh }: { onOpenModal: (open: () => v
       showToast('Please enter a valid date (YYYY-MM-DD).', 'error'); return;
     }
     if (form.date > todayStr()) { showToast('Cannot regularize a future date.', 'error'); return; }
+    if (form.date < regularizeMinDate(tenant)) { showToast(`Regularization can only be requested for ${regularizeWindowLabel(tenant)}.`, 'error'); return; }
     if (!TIME_RE.test(form.clockInTime)) { showToast('Clock-in time must be in HH:MM (24h) format.', 'error'); return; }
     if (!TIME_RE.test(form.clockOutTime)) { showToast('Clock-out time must be in HH:MM (24h) format.', 'error'); return; }
     if (form.clockInTime >= form.clockOutTime) { showToast('Clock-out must be after clock-in.', 'error'); return; }
@@ -385,7 +394,7 @@ function RegularizeTab({ onOpenModal, onRefresh }: { onOpenModal: (open: () => v
     try {
       const { error, tier } = await submitRegularizeRequest(tenant.id, profile!.id, form);
       if (error) throw error;
-      const msg = tier === 'self' ? 'Auto-approved! Attendance updated.' : tier === 'manager' ? 'Sent to Manager.' : 'Escalated to HR.';
+      const msg = tier === 'self' ? 'Auto-approved! Attendance updated.' : tier === 'manager' ? 'Sent to your manager for approval — HR gets a copy.' : 'Sent to HR for approval.';
       showToast(msg, tier === 'self' ? 'success' : 'info');
       setShowModal(false); fetchData();
     } catch (err: any) {
@@ -397,7 +406,8 @@ function RegularizeTab({ onOpenModal, onRefresh }: { onOpenModal: (open: () => v
 
   return (
     <>
-      {quota && <QuotaBanner quota={quota} />}
+      <RegularizeExtensionNotice tenant={tenant} />
+      {quota && showQuota && <QuotaBanner quota={selfLimit != null ? { ...quota, selfLimit } : quota} />}
       {loading ? (
         <View style={s.loadingBox}><ActivityIndicator color={C.primary} size="large" /></View>
       ) : requests.length === 0 ? (
@@ -453,7 +463,7 @@ function RegularizeTab({ onOpenModal, onRefresh }: { onOpenModal: (open: () => v
             <ScrollView showsVerticalScrollIndicator={false}>
               <View style={s.infoBanner}>
                 <Ionicons name="information-circle-outline" size={14} color={C.primary} />
-                <Text style={s.infoText}>Request a correction for a missed or incorrect punch. Manager approval may be required.</Text>
+                <Text style={s.infoText}>Request a correction for a missed or incorrect punch — allowed for {regularizeWindowLabel(tenant)} only. It goes to your manager for approval, and HR gets a copy (either can approve).</Text>
               </View>
               <View style={s.formGroup}>
                 <Text style={s.formLabel}>Date</Text>
@@ -549,6 +559,9 @@ export default function RequestsScreen() {
     (key) => isEnabled(key === 'special' ? 'special_requests' : 'regularize_attendance')
   );
   const [activeTab, setActiveTab] = useState<TabKey>('special');
+  // Resolve against what's actually enabled so a hidden tab (e.g. Special for
+  // Raniwala) never mounts, even for the one render before the effect below.
+  const tab: TabKey | undefined = availableTabs.includes(activeTab) ? activeTab : availableTabs[0];
   const [refreshing, setRefreshing] = useState(false);
 
   useEffect(() => {
@@ -561,13 +574,13 @@ export default function RequestsScreen() {
   const tabAnim = useRef(new Animated.Value(0)).current;
 
   const openNew = () => {
-    if (activeTab === 'special') openSpecialRef.current();
+    if (tab === 'special') openSpecialRef.current();
     else openRegRef.current();
   };
 
   const handleRefresh = async () => {
     setRefreshing(true);
-    await (activeTab === 'special' ? refreshSpecialRef.current() : refreshRegRef.current());
+    await (tab === 'special' ? refreshSpecialRef.current() : refreshRegRef.current());
     setRefreshing(false);
   };
 
@@ -586,7 +599,7 @@ export default function RequestsScreen() {
       <View style={s.header}>
         <View>
           <Text style={s.title}>My Requests</Text>
-          <Text style={s.subtitle}>Overtime, late arrival & attendance</Text>
+          <Text style={s.subtitle}>{availableTabs.includes('special') ? 'Overtime, late arrival & attendance' : 'Attendance regularization'}</Text>
         </View>
         <TouchableOpacity style={s.addBtn} onPress={openNew} activeOpacity={0.85}>
           <Ionicons name="add" size={20} color="#fff" />
@@ -600,7 +613,7 @@ export default function RequestsScreen() {
         {availableTabs.map((key, idx) => {
           const icons = { special: 'flash-outline' as const, regularize: 'calendar-outline' as const };
           const labels = { special: 'Special', regularize: 'Regularize' };
-          const isActive = activeTab === key;
+          const isActive = tab === key;
           return (
             <TouchableOpacity
               key={key}
@@ -619,7 +632,7 @@ export default function RequestsScreen() {
       <ScrollView style={s.scroll} showsVerticalScrollIndicator={false}
         contentContainerStyle={{ paddingBottom: 140 }}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={handleRefresh} tintColor={C.primary} colors={[C.primary]} />}>
-        {availableTabs.length === 0 ? null : activeTab === 'special'
+        {!tab ? null : tab === 'special'
           ? <SpecialTab onOpenModal={(fn) => { openSpecialRef.current = fn; }} onRefresh={(fn) => { refreshSpecialRef.current = fn; }} />
           : <RegularizeTab onOpenModal={(fn) => { openRegRef.current = fn; }} onRefresh={(fn) => { refreshRegRef.current = fn; }} />}
       </ScrollView>

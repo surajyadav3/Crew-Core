@@ -1,5 +1,7 @@
 import * as Notifications from 'expo-notifications';
 import { router } from 'expo-router';
+import { Linking } from 'react-native';
+import { STORE_DEEP_LINK, STORE_URL } from '@/services/appUpdateService';
 
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
@@ -71,6 +73,11 @@ export async function presentLocalNotification(
 export function initNotificationResponseListener() {
   const subscription = Notifications.addNotificationResponseReceivedListener((response) => {
     const type = response.notification.request.content.data?.type as string | undefined;
+    if (type === 'app_update') {
+      // "Update available" (local or pushed) — straight to the store listing.
+      Linking.openURL(STORE_DEEP_LINK).catch(() => Linking.openURL(STORE_URL).catch(() => {}));
+      return;
+    }
     const route = type ? ROUTE_BY_TYPE[type] : undefined;
     if (route) goTo(route);
   });

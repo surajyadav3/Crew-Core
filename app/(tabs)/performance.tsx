@@ -20,7 +20,7 @@ import { showToast } from '@/components/Toast';
 import { fmtDate, fmtDateTime, fmtTime12, todayStr } from '@/lib/helpers';
 import { Colors as C } from '@/constants/Colors';
 
-const fullName = (p: any) => [p?.first_name, p?.middle_name, p?.last_name].filter(Boolean).join(' ') || 'Unknown';
+const fullName = (p: any) => [p?.first_name, p?.middle_name, p?.last_name].filter(Boolean).join(' ').toUpperCase() || 'UNKNOWN';
 
 // ── Shared bits ──────────────────────────────────────────────────────────────
 function ProgressBar({ value }: { value: number }) {

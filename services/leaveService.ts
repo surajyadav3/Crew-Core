@@ -80,35 +80,15 @@ export async function requestLeave(payload: {
 
   const actualTier = inserted?.required_approver_role || tier;
 
-  if (!error && inserted?.id) {
+  // Raniwala multi-stage rows (manager_status set): the DB notifies whoever's
+  // stage is up (trg_notify_leave_stage, web repo 20260926_1) — the manager,
+  // or the HOD when the HOD is also the manager, or HR when neither is on
+  // file. Same as the website's requestLeave; notifying here too sent a
+  // duplicate, and told all of HR "no reporting manager" when the first
+  // approver was actually an HOD.
+  if (!error && inserted?.id && !inserted.manager_status) {
     const requester = await getRequesterLabel(profile_id);
-    if (inserted.manager_status) {
-      // Raniwala dual-approval row — notify the actual reporting manager
-      // directly (not every manager tenant-wide), or HR when no manager is
-      // on file. HR is notified later, once the manager approves a >3-day
-      // leave (mirrors the web app's decideLeaveAsManager).
-      if (inserted.manager_status === 'Pending' && inserted.manager_id) {
-        await notifyProfiles(tenant_id, [inserted.manager_id], {
-          type: 'leave_request_submitted',
-          title: 'New leave request',
-          body: `${requester} submitted a new ${payload.leave_type || ''} leave request${
-            inserted.requires_hr_approval ? ' — over 3 days, will also need HR approval after yours' : ''
-          } — needs your review.`,
-          linkKey: 'leave_requests',
-          actorId: profile_id,
-          relatedId: inserted.id,
-        });
-      } else if (inserted.manager_status === 'Not Required') {
-        await notifyRoles(tenant_id, ['admin'], {
-          type: 'leave_request_submitted',
-          title: 'New leave request',
-          body: `${requester} submitted a new ${payload.leave_type || ''} leave request — no reporting manager on file, needs your review.`,
-          linkKey: 'leave_requests',
-          actorId: profile_id,
-          relatedId: inserted.id,
-        }, profile_id);
-      }
-    } else if (actualTier === 'self') {
+    if (actualTier === 'self') {
       await notifyProfiles(tenant_id, [profile_id], {
         type: 'leave_request_auto_approved',
         title: 'Leave request auto-approved',

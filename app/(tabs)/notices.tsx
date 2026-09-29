@@ -1,18 +1,23 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity, Modal,
-  TextInput, ActivityIndicator, KeyboardAvoidingView, Platform, RefreshControl,
+  TextInput, ActivityIndicator, KeyboardAvoidingView, Platform, RefreshControl, Image,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
+import { useRouter, useLocalSearchParams } from 'expo-router';
+import * as WebBrowser from 'expo-web-browser';
 import { useAuth } from '@/context/AuthContext';
 import { useFeatures } from '@/context/FeatureContext';
 import { useForegroundRefresh } from '@/hooks/useForegroundRefresh';
-import { listPolicies, createPolicy, markPolicyRead, listPolicyReadCounts, listPolicyReads } from '@/services/policyService';
+import {
+  listPolicies, createPolicy, acknowledgePolicy, listMyPolicyAcks, logPolicyDownload, listPolicyAckCounts, listPolicyAcks,
+} from '@/services/policyService';
+import { downloadToDevice } from '@/lib/downloadFile';
 import { listAnnouncements, createAnnouncement } from '@/services/announcementService';
 import { listMyNotifications, markNotificationRead } from '@/services/notificationService';
 import { showToast } from '@/components/Toast';
-import { fmtDate, fmtDateTime } from '@/lib/helpers';
+import { fmtDate, fmtDateTime, personName } from '@/lib/helpers';
 import { Colors as C } from '@/constants/Colors';
 
 type Segment = 'announcements' | 'policies' | 'alerts';
@@ -34,6 +39,7 @@ const NOTIF_ICON: Record<string, keyof typeof Ionicons.glyphMap> = {
 };
 
 export default function NoticesScreen() {
+  const router = useRouter();
   const { profile, tenant } = useAuth();
   const { isEnabled } = useFeatures();
   const canPost = profile?.role === 'admin' || profile?.role === 'superadmin';
@@ -44,6 +50,11 @@ export default function NoticesScreen() {
   const visibleSegments = SEGMENTS.filter((seg) => isEnabled(seg.key));
 
   const [segment, setSegment] = useState<Segment>('announcements');
+  // Home's "Policies" shortcut opens /notices?tab=policies.
+  const { tab } = useLocalSearchParams<{ tab?: string }>();
+  useEffect(() => {
+    if (tab && SEGMENTS.some((seg) => seg.key === tab)) setSegment(tab as Segment);
+  }, [tab]);
   useEffect(() => {
     if (!visibleSegments.some((s) => s.key === segment) && visibleSegments.length) {
       setSegment(visibleSegments[0].key);
@@ -60,41 +71,76 @@ export default function NoticesScreen() {
   const [expandedPolicyId, setExpandedPolicyId] = useState<string | null>(null);
   const [readCounts, setReadCounts] = useState<Record<string, number>>({});
   const [readLists, setReadLists] = useState<Record<string, any[]>>({});
+  // policy_id -> acknowledged_at, for this employee.
+  const [myAcks, setMyAcks] = useState<Record<string, string>>({});
+  const [busyId, setBusyId] = useState<string | null>(null);
+  // Independent of expandedPolicyId (which drives the "seen by" list for an
+  // admin's own policy) — this toggles the description text itself, for
+  // every notice, so long policy bodies don't force endless scrolling past
+  // titles. Collapsed to 2 lines by default.
+  const [expandedBody, setExpandedBody] = useState<Record<string, boolean>>({});
+
+  const isImageAttachment = (name?: string, url?: string) => /\.(jpe?g|png|gif|webp|heic|heif)(\?|$)/i.test(name || url || '');
 
   const fetchAll = useCallback(async () => {
     if (!tenant || !profile) return;
-    const [polRes, annRes, notifRes] = await Promise.all([
+    const [polRes, annRes, notifRes, ackRes] = await Promise.all([
       listPolicies(tenant.id),
       listAnnouncements(tenant.id),
       listMyNotifications(profile.id),
+      listMyPolicyAcks(profile.id),
     ]);
+    if (!ackRes.error) setMyAcks(ackRes.acks);
     if (polRes.error) {
       showToast(polRes.error.message, 'error');
     } else {
       setPolicies(polRes.data);
-      const ownIds = polRes.data.filter((p: any) => p.created_by === profile.id).map((p: any) => p.id);
-      if (ownIds.length > 0) {
-        const { counts } = await listPolicyReadCounts(ownIds);
+      // HR sees how many employees acknowledged each policy.
+      if (canPost && polRes.data.length > 0) {
+        const { counts } = await listPolicyAckCounts(polRes.data.map((p: any) => p.id));
         setReadCounts(counts);
       }
     }
     if (annRes.error) showToast(annRes.error.message, 'error'); else setAnnouncements(annRes.data);
     if (notifRes.error) showToast(notifRes.error.message, 'error'); else setNotifications(notifRes.data);
-  }, [tenant, profile]);
+  }, [tenant, profile, canPost]);
 
   const handleOpenPolicy = async (item: any) => {
-    if (!profile || !tenant) return;
-    if (item.created_by === profile.id) {
-      const next = expandedPolicyId === item.id ? null : item.id;
-      setExpandedPolicyId(next);
-      if (next && !readLists[item.id]) {
-        const { data } = await listPolicyReads(item.id);
-        setReadLists((prev) => ({ ...prev, [item.id]: data }));
-      }
-      return;
+    if (!profile || !tenant || !canPost) return;
+    const next = expandedPolicyId === item.id ? null : item.id;
+    setExpandedPolicyId(next);
+    if (next && !readLists[item.id]) {
+      const { data } = await listPolicyAcks(item.id);
+      setReadLists((prev) => ({ ...prev, [item.id]: data }));
     }
-    markPolicyRead(item.id, profile.id, tenant.id);
   };
+
+  const handleAcknowledge = async (item: any) => {
+    if (!profile || !tenant || myAcks[item.id]) return;
+    setBusyId(item.id);
+    const { error } = await acknowledgePolicy(item.id, profile.id, tenant.id);
+    setBusyId(null);
+    if (error) { showToast(error.message || 'Could not acknowledge.', 'error'); return; }
+    setMyAcks((prev) => ({ ...prev, [item.id]: new Date().toISOString() }));
+    showToast('Thanks — your acknowledgement has been sent to HR.', 'success');
+  };
+
+  const handleDownload = async (item: any) => {
+    if (!profile || !tenant || !item.pdf_url) return;
+    setBusyId(item.id);
+    try {
+      const result = await downloadToDevice(item.pdf_url, item.pdf_name || `${item.title}.pdf`);
+      if (result === 'cancelled') return;
+      logPolicyDownload(item.id, profile.id, tenant.id);
+      if (result === 'saved') showToast('Policy saved to your phone.', 'success');
+    } catch (err: any) {
+      showToast(err.message || 'Download failed.', 'error');
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const pendingAcks = policies.filter((p) => !myAcks[p.id]).length;
 
   useForegroundRefresh(fetchAll, setLoading);
 
@@ -132,6 +178,7 @@ export default function NoticesScreen() {
       await markNotificationRead(n.id);
       setNotifications((prev) => prev.map((x) => (x.id === n.id ? { ...x, is_read: true } : x)));
     }
+    if (n.type === 'verification_request_submitted') router.push('/team-verification' as any);
   };
 
   const list = segment === 'policies' ? policies : segment === 'announcements' ? announcements : notifications;
@@ -198,8 +245,18 @@ export default function NoticesScreen() {
           </View>
         ) : (
           <View style={s.list}>
+            {segment === 'policies' && pendingAcks > 0 && (
+              <View style={s.pendingBanner}>
+                <Ionicons name="alert-circle-outline" size={16} color={C.warning} />
+                <Text style={s.pendingBannerText}>
+                  {pendingAcks} polic{pendingAcks === 1 ? 'y needs' : 'ies need'} your acknowledgement. Please read and tap "I have read & acknowledge".
+                </Text>
+              </View>
+            )}
             {list.map((item) => {
-              const isOwnPolicy = segment === 'policies' && item.created_by === profile?.id;
+              const isPolicy = segment === 'policies';
+              const isOwnPolicy = isPolicy && canPost;
+              const ackedAt = isPolicy ? myAcks[item.id] : null;
               const viewers = (readLists[item.id] || []).filter((r: any) => r.profile_id !== profile?.id);
               return (
                 <TouchableOpacity
@@ -215,12 +272,68 @@ export default function NoticesScreen() {
                     </View>
                     <Text style={s.noticeTitle} numberOfLines={2}>{item.title}</Text>
                   </View>
-                  <Text style={s.noticeBody}>{item.body ?? item.message}</Text>
+                  <Text style={s.noticeBody} numberOfLines={expandedBody[item.id] ? undefined : 2}>
+                    {item.body ?? item.message}
+                  </Text>
+                  {(item.body ?? item.message)?.length > 90 && (
+                    <TouchableOpacity
+                      style={s.expandRow}
+                      hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                      onPress={() => setExpandedBody((prev) => ({ ...prev, [item.id]: !prev[item.id] }))}
+                    >
+                      <Text style={s.expandText}>{expandedBody[item.id] ? 'Show less' : 'Show more'}</Text>
+                      <Ionicons name={expandedBody[item.id] ? 'chevron-up' : 'chevron-down'} size={14} color={C.primary} />
+                    </TouchableOpacity>
+                  )}
+                  {!!item.pdf_url && isPolicy && (
+                    <View style={s.policyActions}>
+                      <TouchableOpacity style={s.policyBtn} activeOpacity={0.85} onPress={() => WebBrowser.openBrowserAsync(item.pdf_url)}>
+                        <Ionicons name="eye-outline" size={15} color={C.primary} />
+                        <Text style={s.policyBtnText}>View</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity style={s.policyBtn} activeOpacity={0.85} disabled={busyId === item.id} onPress={() => handleDownload(item)}>
+                        <Ionicons name="download-outline" size={15} color={C.primary} />
+                        <Text style={s.policyBtnText}>Download</Text>
+                      </TouchableOpacity>
+                    </View>
+                  )}
+                  {!!item.pdf_url && !isPolicy && (
+                    isImageAttachment(item.pdf_name, item.pdf_url) ? (
+                      <TouchableOpacity activeOpacity={0.85} onPress={() => WebBrowser.openBrowserAsync(item.pdf_url)}>
+                        <Image source={{ uri: item.pdf_url }} style={s.attachmentImage} resizeMode="cover" />
+                      </TouchableOpacity>
+                    ) : (
+                      <TouchableOpacity style={s.pdfChip} activeOpacity={0.85} onPress={() => WebBrowser.openBrowserAsync(item.pdf_url)}>
+                        <Ionicons name="document-attach-outline" size={15} color={C.primary} />
+                        <Text style={s.pdfChipText} numberOfLines={1}>{item.pdf_name || 'View attachment'}</Text>
+                      </TouchableOpacity>
+                    )
+                  )}
                   <Text style={s.noticeTime}>Posted {fmtDate(item.created_at)}</Text>
+                  {isPolicy && (ackedAt ? (
+                    <View style={s.ackedRow}>
+                      <Ionicons name="checkmark-circle" size={16} color={C.success} />
+                      <Text style={s.ackedText}>Acknowledged on {fmtDate(ackedAt)}</Text>
+                    </View>
+                  ) : (
+                    <TouchableOpacity
+                      style={[s.ackBtn, busyId === item.id && { opacity: 0.6 }]}
+                      activeOpacity={0.85}
+                      disabled={busyId === item.id}
+                      onPress={() => handleAcknowledge(item)}
+                    >
+                      {busyId === item.id
+                        ? <ActivityIndicator color="#fff" size="small" />
+                        : <>
+                            <Ionicons name="shield-checkmark-outline" size={16} color="#fff" />
+                            <Text style={s.ackBtnText}>I have read & acknowledge</Text>
+                          </>}
+                    </TouchableOpacity>
+                  ))}
                   {isOwnPolicy && (
                     <View style={s.seenByRow}>
                       <Ionicons name="eye-outline" size={13} color={C.muted} />
-                      <Text style={s.seenByText}>Seen by {readCounts[item.id] ?? 0}</Text>
+                      <Text style={s.seenByText}>Acknowledged by {readCounts[item.id] ?? 0} · tap to see who</Text>
                     </View>
                   )}
                   {isOwnPolicy && expandedPolicyId === item.id && (
@@ -228,12 +341,15 @@ export default function NoticesScreen() {
                       {!readLists[item.id] ? (
                         <ActivityIndicator color={C.primary} size="small" />
                       ) : viewers.length === 0 ? (
-                        <Text style={s.seenByEmpty}>No one has opened this yet.</Text>
+                        <Text style={s.seenByEmpty}>No one has acknowledged this yet.</Text>
                       ) : (
                         viewers.map((r: any) => (
                           <View key={r.profile_id} style={s.seenByItem}>
-                            <Text style={s.seenByName}>{r.profile?.first_name} {r.profile?.last_name}</Text>
-                            <Text style={s.seenByTime}>{fmtDateTime(r.read_at)}</Text>
+                            <View style={{ flex: 1 }}>
+                              <Text style={s.seenByName}>{personName(r.profile, 'EMPLOYEE')}</Text>
+                              <Text style={s.seenByTime}>{r.source === 'app' ? `Mobile app${r.device ? ` · ${r.device}` : ''}` : 'Website'}</Text>
+                            </View>
+                            <Text style={s.seenByTime}>{fmtDateTime(r.acknowledged_at)}</Text>
                           </View>
                         ))
                       )}
@@ -353,7 +469,36 @@ const s = StyleSheet.create({
   },
   noticeTitle: { flex: 1, fontSize: 15, fontWeight: '700', color: C.text },
   noticeBody: { fontSize: 13, color: C.muted, lineHeight: 19 },
+  expandRow: { flexDirection: 'row', alignItems: 'center', gap: 3, alignSelf: 'flex-start' },
+  expandText: { fontSize: 12, fontWeight: '700', color: C.primary },
+  attachmentImage: { width: '100%', height: 160, borderRadius: 12, marginTop: 4, backgroundColor: C.bg },
+  pdfChip: {
+    flexDirection: 'row', alignItems: 'center', gap: 6, alignSelf: 'flex-start',
+    backgroundColor: C.primaryBg, borderRadius: 10, paddingHorizontal: 10, paddingVertical: 7, marginTop: 2,
+  },
+  pdfChipText: { fontSize: 12.5, fontWeight: '600', color: C.primary, maxWidth: 220 },
   noticeTime: { fontSize: 11, color: '#CBD5E1' },
+  policyActions: { flexDirection: 'row', gap: 8, marginTop: 2 },
+  policyBtn: {
+    flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6,
+    backgroundColor: C.primaryBg, borderRadius: 12, paddingVertical: 10,
+  },
+  policyBtnText: { fontSize: 13, fontWeight: '700', color: C.primary },
+  ackBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7,
+    backgroundColor: C.success, borderRadius: 12, paddingVertical: 11, marginTop: 2,
+  },
+  ackBtnText: { fontSize: 13, fontWeight: '800', color: '#fff' },
+  ackedRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 6, alignSelf: 'flex-start',
+    backgroundColor: C.successBg, borderRadius: 10, paddingHorizontal: 10, paddingVertical: 6,
+  },
+  ackedText: { fontSize: 12, fontWeight: '700', color: C.success },
+  pendingBanner: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    backgroundColor: C.warningBg, borderLeftWidth: 3, borderLeftColor: C.warning, borderRadius: 12, padding: 12,
+  },
+  pendingBannerText: { flex: 1, fontSize: 12.5, color: '#92400E', fontWeight: '600' },
   seenByRow: { flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: 4 },
   seenByText: { fontSize: 11.5, color: C.muted, fontWeight: '600' },
   seenByList: {
