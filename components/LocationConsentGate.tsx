@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react';
 import * as Location from 'expo-location';
+import { Platform } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useAuth } from '@/context/AuthContext';
 import { useFeatures } from '@/context/FeatureContext';
@@ -35,7 +36,9 @@ export default function LocationConsentGate() {
       askedRef.current = true;
       try {
         const fg = await Location.requestForegroundPermissionsAsync();
-        if (fg.status === 'granted') {
+        // Android builds don't declare background location (Play policy), so
+        // only iOS asks for it; Android tracking is foreground-only.
+        if (fg.status === 'granted' && Platform.OS === 'ios') {
           // iOS requires foreground granted before background can even be
           // requested; Android 10+ needs the same two-step flow in practice
           // (a combined prompt on first ask, a settings-redirect on retry).
