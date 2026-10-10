@@ -17,6 +17,7 @@ import { showToast } from '@/components/Toast';
 import { todayStr, timeStr, diffHours, fmtTime12, fmtDuration, fmtHMS, calculateDistance, fmtLiveClock, fmtLiveDate } from '@/lib/helpers';
 import { presentLocalNotification } from '@/lib/pushNotifications';
 import { useLiveTrackingCapture } from '@/hooks/useLiveTrackingCapture';
+import { getMyTrackingToggle } from '@/services/trackingService';
 
 const CLOCK_OUT_COUNT_KEY = 'clock_out_count';
 
@@ -24,6 +25,49 @@ const CLOCK_OUT_COUNT_KEY = 'clock_out_count';
 // confirm the employee is actually inside the fence. Matches the web app's
 // threshold so the geofence enforces the same standard everywhere.
 const MAX_LOCATION_ACCURACY_M = 150;
+
+// Budget for recording where an unfenced punch was made (see
+// bestEffortPunchLocation) — short, since the punch never depends on it.
+const BEST_EFFORT_FIX_TIMEOUT_MS = 8000;
+// A Live-Tracked employee's punch needs a real GPS position: it listens to GPS
+// for up to TRACKED_FIX_TIMEOUT_MS and stops early once a fix is within
+// TRACKED_GOOD_ACCURACY_M; otherwise it keeps the most accurate fix it heard.
+// Fixes older than TRACKED_MAX_FIX_AGE_MS (a phone's cached position from
+// somewhere else) are ignored.
+const TRACKED_FIX_TIMEOUT_MS = 20000;
+const TRACKED_GOOD_ACCURACY_M = 50;
+const TRACKED_MAX_FIX_AGE_MS = 2 * 60 * 1000;
+const TRACKED_LOCATION_MSG = 'Location is needed to clock in/out — turn on GPS (Location) and allow CrewCore, then try again.';
+
+type Fix = { lat: number; lng: number; accuracy: number };
+
+function trackedGpsFix(): Promise<Fix | null> {
+  return new Promise((resolve) => {
+    let best: Fix | null = null;
+    let sub: Location.LocationSubscription | null = null;
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      sub?.remove();
+      resolve(best);
+    };
+    const timer = setTimeout(finish, TRACKED_FIX_TIMEOUT_MS);
+    Location.watchPositionAsync(
+      { accuracy: Location.Accuracy.BestForNavigation, timeInterval: 1000, distanceInterval: 0 },
+      (loc) => {
+        if (loc.timestamp && Date.now() - loc.timestamp > TRACKED_MAX_FIX_AGE_MS) return;
+        const accuracy = loc.coords.accuracy ?? 9999;
+        if (!best || accuracy < best.accuracy) best = { lat: loc.coords.latitude, lng: loc.coords.longitude, accuracy };
+        if (accuracy <= TRACKED_GOOD_ACCURACY_M) finish();
+      },
+    ).then((s) => { sub = s; if (done) s.remove(); }).catch((err) => {
+      console.warn('[punch-location] watchPositionAsync failed', err);
+      finish();
+    });
+  });
+}
 
 async function maybeAskReview() {
   try {
@@ -91,7 +135,9 @@ export function useClockInOut() {
 
   // Live Tracking (premium, opt-in per employee) — a no-op for every
   // tenant/employee it isn't turned on for. See hooks/useLiveTrackingCapture.ts.
-  useLiveTrackingCapture({ profile, tenant, isClockedIn });
+  // isClockedIn is passed as null until today's punches have loaded, so a
+  // background recording already running isn't stopped by the initial false.
+  const { trackingOn } = useLiveTrackingCapture({ profile, tenant, isClockedIn: loading ? null : isClockedIn });
 
   // Live cross-device sync: a punch made from the web browser (or any other
   // signed-in device) lands in `punches` immediately, and RLS restricts what
@@ -254,17 +300,59 @@ export function useClockInOut() {
     return { inside: false, dist: nearest?.dist ?? 0, name: nearest?.name };
   };
 
+  // Where the punch was made, when no geofence is checked (WFH-approved, or
+  // an outlet without a fence such as Raniwala's B2B SALES field staff).
+  // For everyone else it's for the record only and never blocks the punch:
+  // returns the {0,0} "no location" sentinel on any failure, and is recorded
+  // only if the app already has permission (no new prompt).
+  // A Live-Tracked employee (B2B SALES) must have one — their clock-in/out
+  // point is the start/end of the day's route. Whether they're tracked is
+  // re-read from the DB at the punch itself (the hook's trackingOn can still
+  // be loading or stale). Permission is asked, then a GPS fix (see
+  // trackedGpsFix); with no fix at all the punch is refused (null).
+  // The DB (trg_attendance_punch_location_ping, 20260929_5) copies a tracked
+  // employee's punch location onto the Live Tracking map.
+  const bestEffortPunchLocation = useCallback(async (): Promise<{ lat: number; lng: number } | null> => {
+    const tracked = trackingOn || (profile?.id ? await getMyTrackingToggle(profile.id).catch(() => false) : false);
+    const none = tracked ? null : { lat: 0, lng: 0 };
+    try {
+      const perm = tracked
+        ? await Location.requestForegroundPermissionsAsync()
+        : await Location.getForegroundPermissionsAsync();
+      if (perm.status !== 'granted') {
+        console.warn('[punch-location] permission', perm.status, 'tracked', tracked);
+        return none;
+      }
+      if (tracked) {
+        setLocationStatus('Getting your GPS location…');
+        const fix = await trackedGpsFix();
+        console.warn('[punch-location] tracked fix', fix ? `${fix.lat},${fix.lng} ±${fix.accuracy}m` : 'none');
+        return fix ? { lat: fix.lat, lng: fix.lng } : none;
+      }
+      const pos = await Promise.race([
+        Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced }),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('location-timeout')), BEST_EFFORT_FIX_TIMEOUT_MS)),
+      ]);
+      return { lat: pos.coords.latitude, lng: pos.coords.longitude };
+    } catch (err) {
+      console.warn('[punch-location] failed, tracked', tracked, err);
+      return none;
+    }
+  }, [trackingOn, profile?.id]);
+
   const resolveClockLocation = useCallback(async (): Promise<{ loc: { lat: number; lng: number } | null; msg: string }> => {
     if (profile?.id) {
       const { data: wfh } = await getApprovedWfhForDate(profile.id, todayStr());
       if (wfh) {
         setLocationStatus('Approved WFH today — location check skipped');
-        return { loc: { lat: 0, lng: 0 }, msg: 'Approved WFH today — location check skipped' };
+        const loc = await bestEffortPunchLocation();
+        return { loc, msg: loc ? 'Approved WFH today — location check skipped' : TRACKED_LOCATION_MSG };
       }
     }
     if (!fenceCandidates.length) {
-      setLocationStatus('Geofencing not configured');
-      return { loc: { lat: 0, lng: 0 }, msg: 'Geofencing not configured' };
+      setLocationStatus(outletGeofencingOff ? 'Geofencing disabled for your outlet' : 'Geofencing not configured');
+      const loc = await bestEffortPunchLocation();
+      return { loc, msg: loc ? 'Geofencing not configured' : TRACKED_LOCATION_MSG };
     }
     const { status } = await Location.requestForegroundPermissionsAsync();
     if (status !== 'granted') {
@@ -307,7 +395,7 @@ export function useClockInOut() {
       return { loc: null, msg };
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [profile, fenceCandidates, multiOutlet]);
+  }, [profile, fenceCandidates, multiOutlet, outletGeofencingOff, bestEffortPunchLocation]);
 
   const handleClockIn = useCallback(async () => {
     if (!profile || !tenant) { showToast('Account setup incomplete.', 'error'); return; }
@@ -316,9 +404,11 @@ export function useClockInOut() {
     const { loc, msg } = await resolveClockLocation();
     if (loc === null) { showToast(msg, 'error'); setActionLoading(false); return; }
     try {
-      await svcClockIn(tenant.id, profile.id, tenant, loc.lat !== 0 ? loc : null);
+      const { pendingApproval } = await svcClockIn(tenant.id, profile.id, tenant, loc.lat !== 0 ? loc : null);
       const inTime = fmtTime12(timeStr(new Date()));
-      showToast(`Clocked in at ${inTime}`, 'success');
+      showToast(pendingApproval
+        ? `Clocked in at ${inTime} — sent to your manager for approval`
+        : `Clocked in at ${inTime}`, 'success');
       presentLocalNotification('Clocked In ✓', `You clocked in at ${inTime}`, { type: 'clock_in' });
       await refresh();
     } catch (err: any) {
@@ -334,9 +424,11 @@ export function useClockInOut() {
     const { loc, msg } = await resolveClockLocation();
     if (loc === null) { showToast(msg, 'error'); setActionLoading(false); return; }
     try {
-      const { total } = await svcClockOut(profile!.id, loc.lat !== 0 ? loc : null);
+      const { total, pendingApproval } = await svcClockOut(profile!.id, loc.lat !== 0 ? loc : null);
       const worked = fmtDuration(total);
-      showToast(`Clocked out. Worked ${worked}`, 'success');
+      showToast(pendingApproval
+        ? `Clocked out. Worked ${worked} — counts once your manager approves`
+        : `Clocked out. Worked ${worked}`, 'success');
       presentLocalNotification('Clocked Out', `You worked ${worked} today.`, { type: 'clock_out' });
       await refresh();
       maybeAskReview();

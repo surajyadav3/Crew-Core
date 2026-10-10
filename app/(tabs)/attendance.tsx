@@ -27,6 +27,16 @@ const STATUS_COLORS: Record<string, string> = {
   Absent: C.danger,
   Leave: C.purple,
   Mispunch: '#DB2777',
+  // App punches at outlets that need manager approval (Raniwala Office /
+  // Factory / Delhi) hold the day here until the manager decides.
+  'Pending Approval': C.amber,
+};
+
+// A punch's approval state (punches.approval_status). Device and auto-approved
+// punches are 'approved' and show no pill.
+const PUNCH_APPROVAL: Record<string, { label: string; color: string; bg: string }> = {
+  pending: { label: 'Awaiting manager approval', color: C.amber, bg: C.amberBg },
+  rejected: { label: 'Rejected', color: C.danger, bg: C.dangerBg },
 };
 
 // ── Live clock pulse ──────────────────────────────────────────────────────────
@@ -265,7 +275,13 @@ export default function AttendanceScreen() {
   if (selectedIsOff) dayChips.push({ label: 'Weekly Off', color: C.muted, bg: C.border, icon: 'bed-outline' });
   if (selectedRec?.status) {
     const color = STATUS_COLORS[selectedRec.status] || C.primary;
-    dayChips.push({ label: selectedRec.status, color, bg: color + '22', icon: selectedRec.status === 'Late' ? 'alarm-outline' : selectedRec.status === 'Mispunch' ? 'finger-print' : 'checkmark-circle-outline' });
+    dayChips.push({
+      label: selectedRec.status, color, bg: color + '22',
+      icon: selectedRec.status === 'Late' ? 'alarm-outline'
+        : selectedRec.status === 'Mispunch' ? 'finger-print'
+        : selectedRec.status === 'Pending Approval' ? 'hourglass-outline'
+        : 'checkmark-circle-outline',
+    });
   }
   if (lateArrival) dayChips.push({ label: `Late Arrival · in at ${fmtTime12(firstPunch)} (shift ${fmtTime12(shiftStart)})`, color: C.danger, bg: C.dangerBg, icon: 'log-in-outline' });
   if (earlyLeft) dayChips.push({ label: `Early Left · out at ${fmtTime12(lastPunch)} (shift ends ${fmtTime12(shiftEnd)})`, color: C.danger, bg: C.dangerBg, icon: 'log-out-outline' });
@@ -515,6 +531,13 @@ export default function AttendanceScreen() {
                           {p.punch_type === 'in' ? (i === 0 ? 'Clock In' : 'Resume') : 'Clock Out'}
                         </Text>
                       </View>
+                      {!!PUNCH_APPROVAL[p.approval_status] && (
+                        <View style={[s.tlTypePill, { backgroundColor: PUNCH_APPROVAL[p.approval_status].bg }]}>
+                          <Text style={[s.tlType, { color: PUNCH_APPROVAL[p.approval_status].color }]}>
+                            {PUNCH_APPROVAL[p.approval_status].label}
+                          </Text>
+                        </View>
+                      )}
                     </View>
                   </View>
                 ))}
@@ -673,7 +696,7 @@ const s = StyleSheet.create({
   timelineLeft: { alignItems: 'center', width: 20 },
   tlDot: { width: 14, height: 14, borderRadius: 7, borderWidth: 2, borderColor: C.surface, marginTop: 4 },
   tlLine: { width: 2, flex: 1, backgroundColor: C.border, marginTop: 4, marginBottom: 4, borderRadius: 1, minHeight: 20 },
-  timelineRight: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 10, paddingBottom: 16 },
+  timelineRight: { flex: 1, flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 10, paddingBottom: 16 },
   tlTime: { fontSize: 14, fontWeight: '700', color: C.text, width: 84, fontVariant: ['tabular-nums'] },
   tlTypePill: { borderRadius: 10, paddingHorizontal: 10, paddingVertical: 4 },
   tlType: { fontSize: 12, fontWeight: '700' },

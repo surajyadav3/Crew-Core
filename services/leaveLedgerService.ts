@@ -18,3 +18,18 @@ export async function fetchMyLeaveBalances(profileId: string) {
     .eq('profile_id', profileId);
   return { data: data || [], error };
 }
+
+/**
+ * This employee's own ledger rows, oldest first — the statement behind each
+ * balance (credits, HR adjustments, leave taken). Mirrors the website's
+ * fetchMyLeaveLedger (src/services/leaveLedgerService.js).
+ */
+export async function fetchMyLeaveLedger(profileId: string) {
+  const { data, error } = await supabase
+    .from('leave_ledger')
+    .select('id, leave_type_id, entry_type, days, effective_date, leave_request_id, note, created_at')
+    .eq('profile_id', profileId)
+    .order('effective_date', { ascending: true })
+    .order('created_at', { ascending: true });
+  return { data: data || [], error };
+}

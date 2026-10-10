@@ -8,6 +8,7 @@ import {
 import { sendOtp as svcSendOtp, verifyOtp as svcVerifyOtp, resolveLoginEmail } from '@/services/otpService';
 import { registerForPush } from '@/services/pushService';
 import { presentLocalNotification } from '@/lib/pushNotifications';
+import { resetLiveTracking } from '@/lib/liveTrackingTask';
 
 type Profile = {
   id: string;
@@ -206,6 +207,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       console.error('[CrewCore] local sign-out error:', err);
     } finally {
       explicitSignOutRef.current = false;
+      // Stop Live Tracking and forget this employee's context and any unsent
+      // fixes, so a signed-out phone never keeps recording in the background.
+      resetLiveTracking().catch(() => {});
       saveCachedProfile(null);
       clearLocalState();
     }
@@ -460,6 +464,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       console.error('[CrewCore] signOut error (clearing local state anyway):', err);
     } finally {
       explicitSignOutRef.current = false;
+      // Stop Live Tracking and forget this employee's context and any unsent
+      // fixes, so a signed-out phone never keeps recording in the background.
+      resetLiveTracking().catch(() => {});
       saveCachedProfile(null);
       clearLocalState();
     }

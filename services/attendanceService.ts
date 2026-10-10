@@ -138,12 +138,17 @@ export async function clockIn(tenantId: string, profileId: string, tenant: any, 
     .single();
   if (fetchErr) throw fetchErr;
 
-  const { error: punchErr } = await supabase
+  // The DB holds app punches for manager approval at outlets that need it
+  // (trg_punch_mark_pending_approval) — read back what it decided.
+  const { data: punch, error: punchErr } = await supabase
     .from('punches')
-    .insert([{ attendance_id: att.id, punch_time: timeStr(new Date()), punch_type: 'in' }]);
+    .insert([{ attendance_id: att.id, punch_time: timeStr(new Date()), punch_type: 'in' }])
+    .select('approval_status')
+    .single();
   if (punchErr) throw punchErr;
 
   sendPunchNotification(tenantId, profileId, 'in');
+  return { pendingApproval: punch?.approval_status === 'pending' };
 }
 
 /**
@@ -410,9 +415,11 @@ export async function clockOut(profileId: string, locationData: { lat: number; l
   }
 
   const punchOutTime = timeStr(new Date());
-  const { error: punchErr } = await supabase
+  const { data: outPunch, error: punchErr } = await supabase
     .from('punches')
-    .insert([{ attendance_id: att.id, punch_time: punchOutTime, punch_type: 'out' }]);
+    .insert([{ attendance_id: att.id, punch_time: punchOutTime, punch_type: 'out' }])
+    .select('approval_status')
+    .single();
   if (punchErr) throw punchErr;
 
   const { data: allPunches, error: allErr } = await supabase
@@ -482,5 +489,5 @@ export async function clockOut(profileId: string, locationData: { lat: number; l
 
   sendPunchNotification(att.tenant_id, profileId, 'out');
 
-  return { total };
+  return { total, pendingApproval: outPunch?.approval_status === 'pending' };
 }

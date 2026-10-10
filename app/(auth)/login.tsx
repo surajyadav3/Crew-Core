@@ -17,6 +17,19 @@ import { Colors as C } from '@/constants/Colors';
 
 const { width: W, height: H } = Dimensions.get('window');
 
+/**
+ * What the OTP field sends: an email as typed, or a mobile number reduced to
+ * its 10 digits so "+91 98765 43210" / "098765 43210" work too.
+ */
+const toOtpIdentifier = (raw: string) => {
+  const t = raw.trim();
+  if (t.includes('@')) return t;
+  let d = t.replace(/\D/g, '');
+  if (d.length === 12 && d.startsWith('91')) d = d.slice(2);
+  else if (d.length === 11 && d.startsWith('0')) d = d.slice(1);
+  return d;
+};
+
 export default function LoginScreen() {
   const { signIn, sendOtp, verifyOtp, user, profile, loading, signOut, profileStatus } = useAuth();
   const router = useRouter();
@@ -104,14 +117,16 @@ export default function LoginScreen() {
   const handleSendOtp = useCallback(async () => {
     setError(''); setSuccessMsg('');
     if (!identifier.trim()) { setError('Please enter your email or mobile number.'); return; }
-    if (!idType) { setError('Please enter a valid email or mobile number.'); return; }
+    if (!idType) { setError('Please enter a valid email or 10-digit mobile number.'); return; }
     setSubmitting(true);
     try {
-      const result = await sendOtp(identifier);
+      const result = await sendOtp(toOtpIdentifier(identifier));
       setResolvedId(result.identifier);
       setOtp('');
       setOtpStep(2);
-      setSuccessMsg(`OTP sent to ${result.identifier}. Check your inbox.`);
+      setSuccessMsg(result.type === 'phone'
+        ? `OTP sent to +91 ${result.identifier} by SMS.`
+        : `OTP sent to ${result.identifier}. Check your inbox.`);
     } catch (err: any) {
       if (err.message?.includes('not found')) setError('No account found. Please contact your admin.');
       else if (err.message?.includes('rate')) setError('Too many attempts. Please wait and try again.');
@@ -307,7 +322,7 @@ export default function LoginScreen() {
                   style={s.forgotRow}
                   onPress={() => {
                     setMode('reset'); setOtpStep(1); setOtp(''); setError(''); setSuccessMsg('');
-                    setIdentifier(email); setIdType(detectIdentifierType(email));
+                    setIdentifier(email); setIdType(detectIdentifierType(toOtpIdentifier(email)));
                   }}
                 >
                   <Text style={s.link}>Forgot password?</Text>
@@ -330,31 +345,36 @@ export default function LoginScreen() {
             <>
               {mode === 'reset' && (
                 <Text style={[s.subtitle, { marginTop: -8, marginBottom: 18 }]}>
-                  Enter your account email — we'll send a code to verify it's you before you pick a new password.
+                  Enter your account email or mobile number — we'll send a code to verify it's you before you pick a new password.
                 </Text>
               )}
               <View style={s.group}>
-                <Text style={s.label}>Email Address</Text>
+                <Text style={s.label}>Email or Mobile Number</Text>
                 <View style={s.inputWrap}>
                   <View style={s.inputIconWrap}>
-                    <Ionicons name="mail-outline" size={16} color={C.primary} />
+                    <Ionicons name={idType === 'phone' ? 'phone-portrait-outline' : 'mail-outline'} size={16} color={C.primary} />
                   </View>
                   <TextInput
                     style={s.input}
-                    placeholder="you@company.com"
+                    placeholder="you@company.com or 98765 43210"
                     placeholderTextColor={C.muted}
                     value={identifier}
-                    onChangeText={(t) => { setIdentifier(t); setIdType(detectIdentifierType(t)); }}
+                    onChangeText={(t) => { setIdentifier(t); setIdType(detectIdentifierType(toOtpIdentifier(t))); }}
                     keyboardType="email-address"
                     autoCapitalize="none"
+                    autoCorrect={false}
                   />
                   {idType && (
                     <View style={s.idTypeBadge}>
-                      <Text style={s.idTypeBadgeText}>{idType.toUpperCase()}</Text>
+                      <Text style={s.idTypeBadgeText}>{idType === 'phone' ? 'SMS' : 'EMAIL'}</Text>
                     </View>
                   )}
                 </View>
-                <Text style={s.hint}>We'll send a 6-digit OTP to your email.</Text>
+                <Text style={s.hint}>
+                  {idType === 'phone'
+                    ? "We'll send a 6-digit OTP to this mobile by SMS."
+                    : "We'll send a 6-digit OTP to your email, or by SMS to your mobile."}
+                </Text>
               </View>
 
               <TouchableOpacity
@@ -378,11 +398,14 @@ export default function LoginScreen() {
             <>
               <View style={s.otpHeader}>
                 <View style={s.otpHeaderIcon}>
-                  <Ionicons name="mail" size={20} color={C.primary} />
+                  <Ionicons name={idType === 'phone' ? 'phone-portrait' : 'mail'} size={20} color={C.primary} />
                 </View>
                 <View style={{ flex: 1 }}>
                   <Text style={s.otpHeaderTitle}>OTP Sent</Text>
-                  <Text style={s.otpHeaderSub}>Check <Text style={{ fontWeight: '700', color: C.text }}>{resolvedId}</Text></Text>
+                  <Text style={s.otpHeaderSub}>
+                    {idType === 'phone' ? 'SMS to ' : 'Check '}
+                    <Text style={{ fontWeight: '700', color: C.text }}>{idType === 'phone' ? `+91 ${resolvedId}` : resolvedId}</Text>
+                  </Text>
                 </View>
               </View>
 
@@ -407,7 +430,7 @@ export default function LoginScreen() {
                   <Text style={[s.link, submitting && { opacity: 0.5 }]}>Resend OTP</Text>
                 </TouchableOpacity>
                 <TouchableOpacity onPress={() => { setOtpStep(1); setOtp(''); setError(''); setSuccessMsg(''); }}>
-                  <Text style={s.link}>← Change Email</Text>
+                  <Text style={s.link}>{idType === 'phone' ? '← Change Number' : '← Change Email'}</Text>
                 </TouchableOpacity>
               </View>
             </>

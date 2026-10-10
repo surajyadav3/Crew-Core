@@ -8,7 +8,7 @@ import { useAuth } from '@/context/AuthContext';
 import { useForegroundRefresh } from '@/hooks/useForegroundRefresh';
 import { fetchMyPayslip } from '@/services/payrollService';
 import { showToast } from '@/components/Toast';
-import { fmt, monthLabel } from '@/lib/helpers';
+import { fmt, fmtDate, monthLabel } from '@/lib/helpers';
 import { Colors as C } from '@/constants/Colors';
 
 function Amt({ value, show }: { value: number; show: boolean }) {
@@ -16,15 +16,38 @@ function Amt({ value, show }: { value: number; show: boolean }) {
   return <Text style={s.amtText}>{fmt(value)}</Text>;
 }
 
-function PayslipRow({ label, value, show, bold, isTotal }: {
-  label: string; value: number; show: boolean; bold?: boolean; isTotal?: boolean;
+function PayslipRow({ label, value, show, bold, isTotal, note, remark }: {
+  label: string; value: number; show: boolean; bold?: boolean; isTotal?: boolean; note?: string; remark?: string;
 }) {
   return (
     <View style={[s.psRow, isTotal && s.psTotalRow]}>
-      <Text style={[s.psLabel, (bold || isTotal) && { fontWeight: '700', color: isTotal ? C.success : C.text }]}>
-        {label}
-      </Text>
+      <View style={{ flex: 1, paddingRight: 10 }}>
+        <Text style={[s.psLabel, (bold || isTotal) && { fontWeight: '700', color: isTotal ? C.success : C.text }]}>
+          {label}{note ? <Text style={s.psNote}> · {note}</Text> : null}
+        </Text>
+        {!!remark && <Text style={s.psNote}>Remark: {remark}</Text>}
+      </View>
       <Amt value={value} show={show} />
+    </View>
+  );
+}
+
+// Raniwala's employer contribution rates — mirror RANIWALA_RULES in the
+// website's src/lib/raniwalaPayroll.js (labels only; the amounts come frozen
+// from the payslip's breakdown.raniwala).
+const RANIWALA_PF_EMPLOYER_RATE = 13;
+const RANIWALA_ESIC_EMPLOYER_RATE = 3.25;
+
+function InfoBox({ title, items }: { title: string; items: { label: string; value: React.ReactNode }[] }) {
+  return (
+    <View style={s.sectionCard}>
+      <Text style={s.infoBoxTitle}>{title}</Text>
+      {items.map((it) => (
+        <View key={it.label} style={s.psRow}>
+          <Text style={[s.psLabel, { flex: 1, paddingRight: 10 }]}>{it.label}</Text>
+          {typeof it.value === 'string' ? <Text style={s.amtText}>{it.value}</Text> : it.value}
+        </View>
+      ))}
     </View>
   );
 }
@@ -75,7 +98,9 @@ export default function PayslipsScreen() {
       `Month: ${monthLabel(month, year)}`,
       `Employee: ${slip.emp_name}`,
       `Department: ${slip.department || '—'}`,
-      `Days Worked: ${slip.work_days}/${slip.total_work_days}`,
+      breakdown.raniwala
+        ? `Paid Days: ${breakdown.raniwala.paidDays}/${breakdown.raniwala.monthDays}`
+        : `Days Worked: ${slip.work_days}/${slip.total_work_days}`,
       '', '=== EARNINGS ===',
       ...(breakdown.earnings || []).map((e: any) => `${e.name}: ${fmt(e.amount)}`),
       `Total Earnings: ${fmt(slip.gross_earnings)}`,
@@ -94,6 +119,25 @@ export default function PayslipsScreen() {
   };
 
   const breakdown = slip ? parseBreakdown(slip) : { earnings: [], deductions: [] };
+  // Raniwala payslips carry their full salary structure, frozen at payroll
+  // time — the same fields the website's RaniwalaPayslip shows.
+  const rw = breakdown.raniwala || null;
+  const empDetails: { label: string; value: string; icon: keyof typeof Ionicons.glyphMap }[] = !slip ? [] : rw
+    ? [
+      { label: 'Employee Code', value: rw.empCode || '—', icon: 'id-card-outline' },
+      { label: 'Name', value: (slip.emp_name || '').toUpperCase(), icon: 'person-outline' },
+      { label: "Father's Name", value: (rw.fatherName || '—').toUpperCase(), icon: 'people-outline' },
+      { label: 'Department', value: (slip.department || '—').toUpperCase(), icon: 'briefcase-outline' },
+      { label: 'Designation', value: (slip.designation || '—').toUpperCase(), icon: 'ribbon-outline' },
+      { label: 'Date of Joining', value: fmtDate(rw.joinDate), icon: 'enter-outline' },
+      { label: 'Paid Days', value: `${rw.paidDays} of ${rw.monthDays}`, icon: 'calendar-outline' },
+    ]
+    : [
+      { label: 'Name', value: (slip.emp_name || '').toUpperCase(), icon: 'person-outline' },
+      { label: 'Department', value: (slip.department || '—').toUpperCase(), icon: 'briefcase-outline' },
+      { label: 'Designation', value: (slip.designation || '—').toUpperCase(), icon: 'ribbon-outline' },
+      { label: 'Days Worked', value: `${slip.work_days} of ${slip.total_work_days}`, icon: 'calendar-outline' },
+    ];
   const revealScale = revealAnim.interpolate({ inputRange: [0, 1], outputRange: [1, 0.97] });
 
   return (
@@ -202,12 +246,7 @@ export default function PayslipsScreen() {
             {/* Employee info */}
             <View style={s.empCard}>
               <Text style={s.cardSectionTitle}>Employee Details</Text>
-              {[
-                { label: 'Name', value: (slip.emp_name || '').toUpperCase(), icon: 'person-outline' as const },
-                { label: 'Department', value: (slip.department || '—').toUpperCase(), icon: 'briefcase-outline' as const },
-                { label: 'Designation', value: (slip.designation || '—').toUpperCase(), icon: 'ribbon-outline' as const },
-                { label: 'Days Worked', value: `${slip.work_days} of ${slip.total_work_days}`, icon: 'calendar-outline' as const },
-              ].map((item, idx, arr) => (
+              {empDetails.map((item, idx, arr) => (
                 <View key={item.label}>
                   <View style={s.empRow}>
                     <View style={s.empIconWrap}>
@@ -232,7 +271,7 @@ export default function PayslipsScreen() {
                 <Text style={[s.sectionTitle, { color: C.success }]}>Earnings</Text>
               </View>
               {(breakdown.earnings || []).map((e: any, i: number) => (
-                <PayslipRow key={i} label={e.name} value={e.amount} show={showAmounts} />
+                <PayslipRow key={i} label={e.name} value={e.amount} show={showAmounts} note={e.note} remark={e.remark} />
               ))}
               <PayslipRow label="Total Earnings" value={slip.gross_earnings} show={showAmounts} bold />
             </View>
@@ -246,10 +285,11 @@ export default function PayslipsScreen() {
                 <Text style={[s.sectionTitle, { color: C.danger }]}>Deductions</Text>
               </View>
               {(breakdown.deductions || []).map((d: any, i: number) => (
-                <PayslipRow key={i} label={d.name} value={d.amount} show={showAmounts} />
+                <PayslipRow key={i} label={d.name} value={d.amount} show={showAmounts} note={d.note} remark={d.remark} />
               ))}
-              {slip.advance_deduction > 0 && (
-                <PayslipRow label="Advance/Loan Recovery" value={slip.advance_deduction} show={showAmounts} />
+              {slip.advance_deduction > 0 && (rw
+                ? <PayslipRow label="Advance" note="monthly recovery" value={slip.advance_deduction} show={showAmounts} />
+                : <PayslipRow label="Advance/Loan Recovery" value={slip.advance_deduction} show={showAmounts} />
               )}
               <PayslipRow
                 label="Total Deductions"
@@ -269,6 +309,34 @@ export default function PayslipsScreen() {
                 {showAmounts ? fmt(slip.net_pay) : '₹ ••••••'}
               </Text>
             </View>
+
+            {rw && (
+              <InfoBox title="Salary" items={[
+                { label: 'Gross Salary (month)', value: <Amt value={rw.grossSalary} show={showAmounts} /> },
+              ]} />
+            )}
+            {rw && rw.advanceOpening > 0 && (
+              <InfoBox title="Advance" items={[
+                { label: 'Balance before', value: <Amt value={rw.advanceOpening} show={showAmounts} /> },
+                { label: 'Deducted this month', value: <Amt value={rw.advanceDeducted} show={showAmounts} /> },
+                { label: 'Advance balance', value: <Amt value={rw.advanceBalance} show={showAmounts} /> },
+              ]} />
+            )}
+            {rw && (
+              <InfoBox title="Contribution" items={[
+                { label: `PF (Employer, ${RANIWALA_PF_EMPLOYER_RATE}%${rw.pfCapped ? ', capped' : ''})`, value: <Amt value={rw.pfEmployer} show={showAmounts} /> },
+                { label: `ESIC (Employer, ${RANIWALA_ESIC_EMPLOYER_RATE}%)`, value: rw.esicApplicable ? <Amt value={rw.esicEmployer} show={showAmounts} /> : 'Not applicable' },
+                { label: 'CTC for the month', value: <Amt value={slip.gross_earnings + (rw.pfEmployer || 0) + (rw.esicEmployer || 0)} show={showAmounts} /> },
+              ]} />
+            )}
+            {rw && (
+              <Text style={s.footNote}>
+                Contributions are paid by the company on top of the salary — not deducted from your pay.
+                {rw.retentionAmount > 0
+                  ? `\nRetention of ${rw.retentionPercent}% of gross is held during probation, which completes on ${fmtDate(rw.probationEndDate)}.`
+                  : ''}
+              </Text>
+            )}
           </Animated.View>
         )}
       </ScrollView>
@@ -401,6 +469,12 @@ const s = StyleSheet.create({
   psLabel: { fontSize: 13, color: C.text },
   masked: { fontSize: 13, color: C.muted, letterSpacing: 2 },
   amtText: { fontSize: 13, fontWeight: '600', color: C.text },
+  psNote: { fontSize: 11, color: C.muted, fontWeight: '400' },
+  infoBoxTitle: {
+    fontSize: 11, fontWeight: '700', color: C.muted, textTransform: 'uppercase', letterSpacing: 0.8,
+    paddingHorizontal: 16, paddingTop: 14, paddingBottom: 4,
+  },
+  footNote: { fontSize: 11, color: C.muted, lineHeight: 16, marginHorizontal: 18, marginTop: 10 },
 
   // Net pay section
   netPaySection: {

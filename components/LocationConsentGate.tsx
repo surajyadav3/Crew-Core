@@ -1,23 +1,22 @@
 import { useEffect, useRef } from 'react';
 import * as Location from 'expo-location';
-import { Platform } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useAuth } from '@/context/AuthContext';
 import { useFeatures } from '@/context/FeatureContext';
+import { getMyTrackingToggle } from '@/services/trackingService';
 
 const ASKED_KEY_PREFIX = 'crewcore_location_consent_asked_';
 
 /**
- * Renders nothing — asks for foreground, then background, location
- * permission once per employee per install, the moment they're signed in to
- * a tenant with Live Tracking enabled (features.key = 'live_tracking'). This
- * is only the *consent* prompt: whether anything actually gets recorded
- * still depends entirely on employee_tracking_toggles (an admin turning
- * tracking on for this specific person) and being clocked in — see
- * hooks/useLiveTrackingCapture.ts. Asking here means no runtime permission
- * prompt is needed later, at the moment an admin flips that toggle.
+ * Renders nothing — asks for foreground ("While using the app") location
+ * permission once per employee per install, the moment a Live-Tracked
+ * employee (employee_tracking_toggles on — e.g. Raniwala's B2B SALES) signs
+ * in to a tenant with Live Tracking enabled (features.key = 'live_tracking').
+ * Only the system permission dialog; no "Allow all the time" is ever asked
+ * (see lib/liveTrackingTask.ts). Recording itself still depends on being
+ * clocked in — see hooks/useLiveTrackingCapture.ts.
  *
- * Every other tenant (Live Tracking not enabled) never sees this prompt.
+ * Everyone else (not tracked, or Live Tracking not enabled) never sees it.
  */
 export default function LocationConsentGate() {
   const { profile, tenant } = useAuth();
@@ -33,17 +32,10 @@ export default function LocationConsentGate() {
 
     AsyncStorage.getItem(key).then(async (already) => {
       if (already || cancelled) return;
+      if (!(await getMyTrackingToggle(profile.id)) || cancelled) return;
       askedRef.current = true;
       try {
-        const fg = await Location.requestForegroundPermissionsAsync();
-        // Android builds don't declare background location (Play policy), so
-        // only iOS asks for it; Android tracking is foreground-only.
-        if (fg.status === 'granted' && Platform.OS === 'ios') {
-          // iOS requires foreground granted before background can even be
-          // requested; Android 10+ needs the same two-step flow in practice
-          // (a combined prompt on first ask, a settings-redirect on retry).
-          await Location.requestBackgroundPermissionsAsync();
-        }
+        await Location.requestForegroundPermissionsAsync();
       } catch (err) {
         console.error('[CrewCore] location consent request failed:', err);
       } finally {

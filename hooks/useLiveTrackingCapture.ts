@@ -1,113 +1,147 @@
 import { useEffect, useState } from 'react';
-import * as Location from 'expo-location';
-import * as TaskManager from 'expo-task-manager';
+import { Alert, AppState, Linking, Platform } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useFeatures } from '@/context/FeatureContext';
-import { getMyTrackingToggle, insertPing } from '@/services/trackingService';
-import { todayStr } from '@/lib/helpers';
-
-const LOCATION_TASK_NAME = 'crewcore-live-tracking';
+import { getMyTrackingToggle } from '@/services/trackingService';
+import { setTrackingContext, startRecording, stopRecording } from '@/lib/liveTrackingTask';
 
 // How often an already-running app re-checks whether an admin just turned
 // tracking on/off for this employee — mirrors src/hooks/useLiveTrackingCapture.js's
-// TOGGLE_POLL_MS exactly, same reasoning: without this, someone already
-// clocked in with the app open before an admin flips their toggle would
-// never start capturing until they happened to relaunch.
-const TOGGLE_POLL_MS = 60000;
+// TOGGLE_POLL_MS: without this, someone already clocked in with the app open
+// before an admin flips their toggle would never start capturing until they
+// happened to relaunch. Only polled while clocked in (the feature is
+// tenant-wide, so every Raniwala employee runs this hook) and every 5 min,
+// not every minute, to keep request load on the shared DB down; returning
+// to the app re-checks too.
+const TOGGLE_POLL_MS = 5 * 60 * 1000;
 
-// TaskManager.defineTask runs outside React (it can survive the JS context
-// being torn down and restarted by the OS), so it can't read hook state
-// directly — this module-level ref is the standard Expo pattern for handing
-// a background task whatever context it needs, kept in sync by the hook
-// below every time the signed-in employee/tenant changes.
-let activeContext: { profileId: string; tenantId: string; outletId: string | null } | null = null;
+// Shared by every mounted copy of the hook (Home and Attendance both mount it
+// via useClockInOut), so they make one request between them, not one each.
+let toggleCache: { profileId: string; on: boolean; at: number } | null = null;
+let toggleInFlight: Promise<boolean> | null = null;
 
-TaskManager.defineTask(LOCATION_TASK_NAME, async ({ data, error }) => {
-  if (error || !data || !activeContext) return;
-  const { locations } = data as { locations: Location.LocationObject[] };
-  const last = locations?.[locations.length - 1];
-  if (!last) return;
+function readToggle(profileId: string): Promise<boolean> {
+  if (toggleCache?.profileId === profileId && Date.now() - toggleCache.at < TOGGLE_POLL_MS - 5000) {
+    return Promise.resolve(toggleCache.on);
+  }
+  if (!toggleInFlight) {
+    toggleInFlight = getMyTrackingToggle(profileId)
+      .then((on) => { toggleCache = { profileId, on, at: Date.now() }; return on; })
+      .finally(() => { toggleInFlight = null; });
+  }
+  return toggleInFlight;
+}
 
-  // Re-checked on every delivered fix, not just once at start — an admin
-  // turning tracking off mid-shift stops new pings within one fix, without
-  // needing the app foregrounded to notice.
-  const stillOn = await getMyTrackingToggle(activeContext.profileId).catch(() => false);
-  if (!stillOn) return;
+const BATTERY_ASKED_KEY = 'crewcore_battery_prompt_shown';
 
-  await insertPing(
-    activeContext.tenantId, activeContext.profileId, activeContext.outletId,
-    last.coords.latitude, last.coords.longitude, last.coords.accuracy,
-    todayStr()
-  ).catch((err) => console.error('[live-tracking] ping insert failed:', err));
-});
+// Module-level so the Home and Attendance screens (which each mount this
+// hook) never show the battery prompt twice at once.
+let promptInFlight = false;
+
+/**
+ * Android battery savers (especially Xiaomi, Vivo, Oppo, Realme) kill
+ * foreground services after a while unless the app's battery setting is
+ * "Unrestricted". Shown once per install, the first time recording starts.
+ */
+async function promptBatteryUnrestricted() {
+  if (Platform.OS !== 'android') return;
+  if (await AsyncStorage.getItem(BATTERY_ASKED_KEY).catch(() => null)) return;
+  await AsyncStorage.setItem(BATTERY_ASKED_KEY, '1').catch(() => {});
+  const ok = await new Promise<boolean>((resolve) => {
+    Alert.alert(
+      'Battery setting',
+      'Open CrewCore’s settings → Battery and choose “Unrestricted” (or “No restrictions”) so your '
+        + 'clock-in keeps running on the road. On Xiaomi, Vivo, Oppo and Realme phones also turn on “Autostart”.',
+      [
+        { text: 'Not now', style: 'cancel', onPress: () => resolve(false) },
+        { text: 'Open settings', onPress: () => resolve(true) },
+      ],
+      { cancelable: false },
+    );
+  });
+  if (ok) Linking.openSettings().catch(() => {});
+}
 
 /**
  * Records this employee's location while Live Tracking is on for them
- * (employee_tracking_toggles) and they're clocked in — same on-the-clock
- * lifecycle as src/hooks/useLiveTrackingCapture.js, but backed by a real
- * native background task (expo-location + expo-task-manager) instead of a
- * foreground-only watchPosition, so the trail continues while the app is
- * backgrounded or (Android) fully closed. Silently does nothing for every
- * tenant/employee this premium, opt-in feature hasn't been turned on for.
+ * (employee_tracking_toggles — Raniwala's B2B SALES field staff) and they're
+ * clocked in. The recording itself lives in lib/liveTrackingTask.ts so it
+ * keeps going with the app in the background; this hook only decides when to
+ * start/stop it. It uses the normal "While using the app" permission already
+ * asked at clock-in — no "Allow all the time", no tracking disclosure.
+ * Silently does nothing for every tenant/employee this premium, opt-in
+ * feature hasn't been turned on for.
  *
- * Never requests permission itself — LocationConsentGate already asks once
- * at login for any tenant with Live Tracking enabled; if that was denied,
- * this just never starts (checked via getBackgroundPermissionsAsync below).
+ * `isClockedIn` is null while today's punches are still loading — nothing is
+ * started or stopped on that placeholder, so opening the app doesn't briefly
+ * stop a background recording that's already running.
  */
 export function useLiveTrackingCapture({ profile, tenant, isClockedIn }: {
   profile: { id: string; outlet_id?: string | null } | null;
   tenant: { id: string } | null;
-  isClockedIn: boolean;
+  isClockedIn: boolean | null;
 }) {
   const { isEnabled } = useFeatures();
-  const [trackingOn, setTrackingOn] = useState(false);
+  // null until the first toggle check answers.
+  const [trackingOn, setTrackingOn] = useState<boolean | null>(null);
   const featureOn = isEnabled('live_tracking');
 
   useEffect(() => {
-    if (!profile?.id || !featureOn) { setTrackingOn(false); return; }
+    if (profile?.id && tenant?.id) {
+      setTrackingContext({ profileId: profile.id, tenantId: tenant.id, outletId: profile.outlet_id || null });
+    }
+  }, [profile?.id, profile?.outlet_id, tenant?.id]);
+
+  // Bumped each time the app returns to the foreground — including right after
+  // a system permission dialog or the Settings screen closes — so the start
+  // logic below gets another go once foreground/background permission changed.
+  const [resumeTick, setResumeTick] = useState(0);
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state === 'active') setResumeTick((n) => n + 1);
+    });
+    return () => sub.remove();
+  }, []);
+
+  // The toggle only matters while clocked in, so it's only read then: on
+  // clock-in / app open, on returning to the app, and every TOGGLE_POLL_MS.
+  const clockedIn = isClockedIn === true;
+  useEffect(() => {
+    // Feature off (or feature flags not loaded yet) stays "unknown" rather
+    // than false, so a slow flag load at app launch can't stop a recording
+    // that's already running in the background.
+    if (!profile?.id || !featureOn) { setTrackingOn(null); return; }
+    if (!clockedIn) return;
     let cancelled = false;
     const checkToggle = () => {
-      getMyTrackingToggle(profile.id).then((on) => { if (!cancelled) setTrackingOn(on); });
+      readToggle(profile.id).then((on) => { if (!cancelled) setTrackingOn(on); });
     };
     checkToggle();
     const intervalId = setInterval(checkToggle, TOGGLE_POLL_MS);
     return () => { cancelled = true; clearInterval(intervalId); };
-  }, [profile?.id, featureOn]);
+  }, [profile?.id, featureOn, clockedIn, resumeTick]);
 
+  // Starts/stops recording purely off (trackingOn, isClockedIn) — no unmount
+  // cleanup on purpose: tracking must outlive any one screen (and the app
+  // itself), tied only to clocking out or tracking being switched off.
   useEffect(() => {
-    activeContext = (profile?.id && tenant?.id)
-      ? { profileId: profile.id, tenantId: tenant.id, outletId: profile.outlet_id || null }
-      : null;
-  }, [profile?.id, profile?.outlet_id, tenant?.id]);
-
-  // Starts/stops the background task purely off (trackingOn, isClockedIn)
-  // state — deliberately has no unmount cleanup that stops it, since
-  // useClockInOut (and therefore this hook) mounts once per screen (Home +
-  // Attendance simultaneously); tracking must keep running when one of those
-  // screens unmounts, tied only to actually clocking out.
-  useEffect(() => {
-    if (!trackingOn || !profile?.id || !tenant?.id) return;
+    if (!profile?.id || !tenant?.id || isClockedIn === null) return;
+    // Clocked out: stop without needing the toggle (stopRecording is local only).
+    if (!isClockedIn) { stopRecording(); return; }
+    if (trackingOn === null) return;
+    if (!trackingOn) { stopRecording(); return; }
 
     (async () => {
-      const alreadyStarted = await Location.hasStartedLocationUpdatesAsync(LOCATION_TASK_NAME).catch(() => false);
-      if (isClockedIn && !alreadyStarted) {
-        const fg = await Location.getForegroundPermissionsAsync();
-        const bg = await Location.getBackgroundPermissionsAsync();
-        if (fg.status !== 'granted' || bg.status !== 'granted') return;
-        await Location.startLocationUpdatesAsync(LOCATION_TASK_NAME, {
-          accuracy: Location.Accuracy.Balanced,
-          timeInterval: 45000,
-          distanceInterval: 0,
-          showsBackgroundLocationIndicator: true,
-          foregroundService: {
-            notificationTitle: 'CrewCore',
-            notificationBody: 'Recording your location while you’re clocked in.',
-          },
-        }).catch((err) => console.error('[live-tracking] startLocationUpdatesAsync failed:', err));
-      } else if (!isClockedIn && alreadyStarted) {
-        await Location.stopLocationUpdatesAsync(LOCATION_TASK_NAME).catch(() => {});
+      const mode = await startRecording();
+      if (mode !== 'background' || promptInFlight) return;
+      promptInFlight = true;
+      try {
+        await promptBatteryUnrestricted();
+      } finally {
+        promptInFlight = false;
       }
     })();
-  }, [trackingOn, isClockedIn, profile?.id, tenant?.id]);
+  }, [trackingOn, isClockedIn, profile?.id, tenant?.id, resumeTick]);
 
-  return { trackingOn };
+  return { trackingOn: !!trackingOn };
 }

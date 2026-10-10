@@ -46,7 +46,16 @@ export async function checkForAppUpdate(): Promise<AppUpdateInfo | null> {
   if (error || !data?.latest_version) return null;
 
   const current = currentAppVersion();
-  if (compareVersions(current, data.latest_version) >= 0) return null;
+  const cmp = compareVersions(current, data.latest_version);
+  // Running a build newer than the published one: tell the server. Once a
+  // few employees report the same version it is live in the store, and the
+  // DB moves latest_version up so older installs get prompted
+  // (report_app_version, web repo 20261011_1_app_release_auto_detect.sql).
+  if (cmp > 0 && !__DEV__) {
+    supabase.rpc('report_app_version', { p_platform: Platform.OS, p_version: current })
+      .then(() => {}, () => {});
+  }
+  if (cmp >= 0) return null;
   return {
     latestVersion: data.latest_version,
     notes: data.notes,

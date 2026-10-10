@@ -6,3 +6,9 @@ fix_*.bat
 fix_*.ps1
 store-assets
 PRIVACY_POLICY_TEMPLATE.md
+
+# Local build artifacts and logs (not needed by EAS builders)
+*.apk
+*.aab
+*.log
+build-output

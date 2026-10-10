@@ -16,6 +16,7 @@ import { getOutlet } from '@/services/tenantService';
 import { listMyNotifications, markNotificationRead } from '@/services/notificationService';
 import { fetchMyAdvanceBalance } from '@/services/advanceService';
 import { fetchMyLeaveBalances } from '@/services/leaveLedgerService';
+import { fetchMyCompOffBalance } from '@/services/compOffService';
 import { showToast } from '@/components/Toast';
 import HolidayBanner from '@/components/HolidayBanner';
 import AnnouncementBanner from '@/components/AnnouncementBanner';
@@ -147,10 +148,11 @@ export default function DashboardScreen() {
   const clock = useClockInOut();
   const raniwala = isRaniwalaTenant(tenant);
   // Raniwala: everyone sees their own branch's holidays (listHolidays scopes
-  // to profile.outlet_id + company-wide). Only managers / HODs get their
-  // team's birthdays / anniversaries, today only (the RPC enforces both);
-  // HR sees the 5-day list on the website, not in the app.
-  const showCelebrations = raniwala && ['manager', 'hod'].includes(profile?.role || '');
+  // to profile.outlet_id + company-wide). Managers / HODs get their team's
+  // birthdays / anniversaries, employees their own outlet's — today only
+  // (the RPC enforces scope and today-only); HR sees the 5-day list on the
+  // website, not in the app.
+  const showCelebrations = raniwala && ['manager', 'hod', 'employee'].includes(profile?.role || '');
 
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -158,6 +160,8 @@ export default function DashboardScreen() {
   const [updates, setUpdates] = useState<any[]>([]);
   const [advanceBalance, setAdvanceBalance] = useState(0);
   const [leaveBalances, setLeaveBalances] = useState<any[]>([]);
+  const [freshCompOff, setFreshCompOff] = useState<number | null>(null);
+  const compOffBalance = freshCompOff ?? Number(profile?.comp_off_balance || 0);
   const headerFade = useRef(new Animated.Value(0)).current;
 
   const now = new Date();
@@ -165,14 +169,16 @@ export default function DashboardScreen() {
   const loadData = useCallback(async () => {
     if (!profile || !tenant) return;
     try {
-      const [{ data, error }, { data: holidays, error: holErr }, advRes, { data: myOutlet }, balRes] = await Promise.all([
+      const [{ data, error }, { data: holidays, error: holErr }, advRes, { data: myOutlet }, balRes, compOffRes] = await Promise.all([
         fetchMyMonthAttendance(profile.id, now.getFullYear(), now.getMonth()),
         listHolidays(tenant.id, profile.outlet_id),
         fetchMyAdvanceBalance(profile.id),
         getOutlet(profile.outlet_id),
         fetchMyLeaveBalances(profile.id),
+        fetchMyCompOffBalance(profile.id),
       ]);
       if (!balRes.error) setLeaveBalances(balRes.data);
+      if (compOffRes.balance != null) setFreshCompOff(compOffRes.balance);
       if (error) { showToast('Could not load attendance summary.', 'error'); return; }
       if (holErr) showToast('Could not load holidays.', 'error');
       setAdvanceBalance(advRes.total || 0);
@@ -456,7 +462,7 @@ export default function DashboardScreen() {
                 <Text style={s.sectionLabel}>My Leaves</Text>
                 <LeaveBalanceCard
                   earned={pickEarnedBalance(leaveBalances)}
-                  compOff={profile?.comp_off_balance || 0}
+                  compOff={compOffBalance}
                   onPress={() => router.push('/leaves' as any)}
                 />
               </AnimatedCard>
@@ -490,7 +496,7 @@ export default function DashboardScreen() {
         {/* ── Announcements banner (Raniwala has its own section at the top) ── */}
         {!raniwala && <AnnouncementBanner />}
 
-        {/* ── Branch holidays; today's team birthdays for manager / HOD (Raniwala) ── */}
+        {/* ── Branch holidays; today's birthdays / anniversaries (Raniwala: team for manager / HOD, own outlet for employees) ── */}
         {raniwala && <HolidayBanner />}
         {showCelebrations && <CelebrationsCard todayOnly />}
 
@@ -566,7 +572,7 @@ export default function DashboardScreen() {
                     <Ionicons name="swap-horizontal-outline" size={16} color={C.teal} />
                   </View>
                   <Text style={s.moreStatLabel}>Comp-Off Balance</Text>
-                  <Text style={s.moreStatVal}>{profile?.comp_off_balance || 0}</Text>
+                  <Text style={s.moreStatVal}>{compOffBalance}</Text>
                 </TouchableOpacity>
               )}
             </View>}

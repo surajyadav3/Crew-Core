@@ -35,3 +35,36 @@ export async function insertPing(
   }]);
   return { error };
 }
+
+export type PingRow = {
+  tenant_id: string;
+  employee_id: string;
+  outlet_id: string | null;
+  lat: number;
+  lng: number;
+  accuracy: number | null;
+  recorded_at: string;
+  recorded_date: string;
+};
+
+/**
+ * Writes several fixes in one request, each stamped with the time the phone
+ * took it (recorded_at) — used by the background task to flush pings it had
+ * to hold back while the phone was offline.
+ */
+export async function insertPings(rows: PingRow[]) {
+  const { error } = await supabase.from('employee_location_pings').insert(rows);
+  return { error };
+}
+
+/**
+ * Whether the background task should keep recording: tracking toggle on AND
+ * clocked in on `date` (DB rule, live_tracking_should_record — 20260929_6).
+ * Returns null when the check itself failed (offline), so the caller can keep
+ * its last known answer instead of stopping on a network blip.
+ */
+export async function shouldRecordLocation(date: string): Promise<boolean | null> {
+  const { data, error } = await supabase.rpc('live_tracking_should_record', { p_date: date });
+  if (error) return null;
+  return !!data;
+}

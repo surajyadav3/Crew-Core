@@ -1,4 +1,8 @@
 import 'react-native-url-polyfill/auto';
+// Defines the Live Tracking background task in every JS runtime, including
+// the headless one Android starts after the app was killed — must stay a
+// top-level import here, not inside a screen. See lib/liveTrackingTask.ts.
+import '@/lib/liveTrackingTask';
 import React, { useEffect, useRef, useState } from 'react';
 import { View, Text, TextInput, TouchableOpacity, Alert, Animated, StyleSheet, Easing, Image, Dimensions } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';

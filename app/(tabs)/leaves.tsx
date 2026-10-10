@@ -9,9 +9,11 @@ import { useAuth } from '@/context/AuthContext';
 import { useForegroundRefresh } from '@/hooks/useForegroundRefresh';
 import { listMyLeaveRequests, requestLeave, checkProbationStatus } from '@/services/leaveService';
 import { fetchMyQuota } from '@/services/requestQuotaService';
-import { fetchMyLeaveBalances, listLeaveTypes } from '@/services/leaveLedgerService';
+import { fetchMyLeaveBalances, fetchMyLeaveLedger, listLeaveTypes } from '@/services/leaveLedgerService';
+import { fetchMyCompOffBalance } from '@/services/compOffService';
 import { showToast } from '@/components/Toast';
 import LeaveBalanceCard, { pickEarnedBalance } from '@/components/LeaveBalanceCard';
+import { LeaveSummaryCard, LeaveTracker } from '@/components/LeaveTracker';
 import { fmtDate, todayStr, HIGH_SALARY_THRESHOLD, isRaniwalaTenant } from '@/lib/helpers';
 import { Colors as C } from '@/constants/Colors';
 
@@ -142,7 +144,13 @@ const LEAVE_COLORS: Record<string, { color: string; bg: string }> = {
   'Comp Off': { color: C.teal, bg: C.tealBg },
   'Earned (Probation)': { color: '#F97316', bg: '#FFEDD5' },
   'Earned Leave': { color: C.primary, bg: C.primaryBg },
+  'Unpaid Leave': { color: C.warning, bg: C.warningBg },
 };
+
+// Loss of Pay, no balance. Offered wherever the tenant has it as an active
+// leave type; the DB routes it to Manager, HOD and HR (web repo migration
+// 20261010_3_raniwala_unpaid_leave.sql).
+const UNPAID_LEAVE_TYPE = 'Unpaid Leave';
 
 const STATUS_STYLE: Record<string, { bg: string; color: string }> = {
   Approved: { bg: C.successBg, color: C.success },
@@ -191,37 +199,43 @@ export default function LeavesScreen() {
   const [quota, setQuota] = useState<Quota | null>(null);
   const [balances, setBalances] = useState<LeaveBalance[]>([]);
   const [probation, setProbation] = useState<{ inProbation: boolean; endsOn: string | null; earnedLeaves: number } | null>(null);
-  const [activeLeaveTypeNames, setActiveLeaveTypeNames] = useState<string[]>([]);
+  const [activeLeaveTypes, setActiveLeaveTypes] = useState<any[]>([]);
+  const [ledger, setLedger] = useState<any[]>([]);
+  const [freshCompOff, setFreshCompOff] = useState<number | null>(null);
+  const activeLeaveTypeNames = activeLeaveTypes.map((t) => t.name);
 
   const raniwala = isRaniwalaTenant(tenant);
   // Mirrors src/pages/employee/MyLeavesPage.jsx's compOffEligible exactly —
   // Raniwala makes every employee comp-off eligible regardless of CTC, since
   // factory/lower-paid staff earn it just by punching in on their weekly off.
   const compOffEligible = raniwala || (profile?.ctc || 0) >= HIGH_SALARY_THRESHOLD;
-  const compOffBalance = profile?.comp_off_balance || 0;
+  const compOffBalance = freshCompOff ?? Number(profile?.comp_off_balance || 0);
   const hasCompOff = compOffEligible && compOffBalance > 0;
   const earned = pickEarnedBalance(balances);
   const earnedTypeName = balances.find((b) => /earned/i.test(b.leave_type?.name || ''))?.leave_type?.name
     || activeLeaveTypeNames.find((n) => /earned/i.test(n)) || 'Earned Leave';
-  // Raniwala: employees only ever pick Earned Leave or Comp Off. Marriage /
+  // Raniwala: employees pick Earned Leave, Unpaid Leave or Comp Off. Marriage /
   // bereavement etc. are requested as Earned Leave with the occasion in the
   // reason, and HR credits extra days to the balance when granting it.
+  const unpaidOffered = activeLeaveTypeNames.includes(UNPAID_LEAVE_TYPE);
   const leaveTypes = probation?.inProbation
     ? ['Earned (Probation)']
     : raniwala
-      ? [earnedTypeName, 'Comp Off']
+      ? [earnedTypeName, ...(unpaidOffered ? [UNPAID_LEAVE_TYPE] : []), 'Comp Off']
       : [...activeLeaveTypeNames, ...(hasCompOff ? ['Comp Off'] : [])];
   const typeBalance = (t: string): number | null =>
     t === 'Comp Off' ? compOffBalance : raniwala && t === earnedTypeName ? earned.balance : null;
 
   const fetchRequests = useCallback(async () => {
     if (!profile) return;
-    const [reqRes, probRes, quotaRes, balRes, typesRes] = await Promise.all([
+    const [reqRes, probRes, quotaRes, balRes, typesRes, ledgerRes, compOffRes] = await Promise.all([
       listMyLeaveRequests(profile.id),
       checkProbationStatus(profile.id),
       tenant ? fetchMyQuota(tenant.id, profile.id) : null,
       fetchMyLeaveBalances(profile.id),
       tenant ? listLeaveTypes(tenant.id) : null,
+      fetchMyLeaveLedger(profile.id),
+      fetchMyCompOffBalance(profile.id),
     ]);
     if (reqRes.error) showToast(reqRes.error.message, 'error');
     else setRequests(reqRes.data);
@@ -229,8 +243,10 @@ export default function LeavesScreen() {
     if (quotaRes) setQuota(quotaRes);
     if (!balRes.error) setBalances(balRes.data as LeaveBalance[]);
     if (typesRes && !typesRes.error) {
-      setActiveLeaveTypeNames(typesRes.data.filter((t: any) => t.is_active).map((t: any) => t.name));
+      setActiveLeaveTypes(typesRes.data.filter((t: any) => t.is_active));
     }
+    if (!ledgerRes.error) setLedger(ledgerRes.data);
+    if (compOffRes.balance != null) setFreshCompOff(compOffRes.balance);
   }, [profile, tenant]);
 
   // Default the request form to the tenant's first active leave type, once
@@ -269,11 +285,11 @@ export default function LeavesScreen() {
       showToast('You have no earned probation leaves yet. Work all days in a month to earn one.', 'error');
       return;
     }
-    if (raniwala && !probation?.inProbation) {
-      const avail = typeBalance(form.leave_type);
+    // Same rule as the website: only Comp Off is capped by its balance.
+    if (form.leave_type === 'Comp Off') {
       const need = daysBetween(form.start_date, form.end_date);
-      if (avail != null && need > avail) {
-        showToast(`Not enough ${form.leave_type} balance — you have ${avail} day${avail === 1 ? '' : 's'}, this request needs ${need}.`, 'error');
+      if (need > compOffBalance) {
+        showToast(`You have ${compOffBalance} comp off day${compOffBalance === 1 ? '' : 's'} — this request needs ${need}.`, 'error');
         return;
       }
     }
@@ -285,8 +301,10 @@ export default function LeavesScreen() {
       if (error) {
         showToast(error.message || 'Failed to submit leave request.', 'error');
       } else {
-        const msg = raniwala
-          ? (days > 3 ? 'Sent to your manager, then HR, for approval.' : 'Sent to your manager for approval.')
+        const msg = raniwala && form.leave_type === UNPAID_LEAVE_TYPE
+          ? 'Sent for Manager, HOD and HR approval.'
+          : raniwala
+          ? 'Leave request sent for approval.'
           : tier === 'self' ? 'Auto-approved!' : tier === 'manager' ? 'Sent to Manager for approval.' : 'Submitted for HR approval.';
         showToast(msg, tier === 'self' ? 'success' : 'info');
         setShowModal(false);
@@ -348,6 +366,25 @@ export default function LeavesScreen() {
         {raniwala && !probation?.inProbation
           ? <LeaveBalanceCard earned={earned} compOff={compOffBalance} />
           : <LeaveBalanceRow balances={balances} />}
+        {raniwala && !probation?.inProbation && (
+          <LeaveSummaryCard
+            ledger={ledger}
+            requests={requests}
+            earnedTypeId={activeLeaveTypes.find((t) => t.name === earnedTypeName)?.id}
+            earnedTypeName={earnedTypeName}
+            unpaidTypeName={UNPAID_LEAVE_TYPE}
+            compOffBalance={compOffBalance}
+          />
+        )}
+        {!probation?.inProbation && (
+          <LeaveTracker
+            leaveTypes={raniwala ? activeLeaveTypes.filter((t) => [earnedTypeName, UNPAID_LEAVE_TYPE].includes(t.name)) : activeLeaveTypes}
+            ledger={ledger}
+            requests={requests}
+            compOffBalance={compOffEligible ? compOffBalance : null}
+          />
+        )}
+        {requests.length > 0 && <Text style={s.sectionTitle}>My Requests</Text>}
         {loading ? (
           <View style={s.loadingBox}><ActivityIndicator color={C.primary} size="large" /></View>
         ) : requests.length === 0 ? (
@@ -390,8 +427,10 @@ export default function LeavesScreen() {
                     </View>
                     {raniwala && req.manager_status != null && (
                       <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}>
-                        {stagePill('Mgr', req.manager_status)}
-                        {req.requires_hr_approval && stagePill('HR', req.hr_status)}
+                        {stagePill('Manager', req.manager_status)}
+                        {stagePill('HOD', req.hod_status)}
+                        {stagePill('HR', req.hr_status)}
+                        {stagePill('Management', req.management_status)}
                       </View>
                     )}
                     {!!req.reason && <Text style={s.reasonText} numberOfLines={2}>{req.reason}</Text>}
@@ -435,6 +474,12 @@ export default function LeavesScreen() {
                   )}
                   <Ionicons name="chevron-down" size={16} color={C.muted} />
                 </TouchableOpacity>
+                {form.leave_type === UNPAID_LEAVE_TYPE && (
+                  <Text style={s.formHint}>
+                    Unpaid leave is Loss of Pay — these days are not paid and your Earned Leave balance is not touched.
+                    It needs approval from your Manager, HOD and HR.
+                  </Text>
+                )}
               </View>
 
               <View style={s.row}>
@@ -490,6 +535,7 @@ export default function LeavesScreen() {
                   <View style={[s.pickerDot, { backgroundColor: lt.color }]} />
                   <Text style={[s.pickerText, form.leave_type === t && { color: lt.color, fontWeight: '700' }]}>{t}</Text>
                   {typeBalance(t) != null && <Text style={s.pickerBal}>{typeBalance(t)} left</Text>}
+                  {t === UNPAID_LEAVE_TYPE && <Text style={s.pickerBal}>Loss of Pay</Text>}
                   {form.leave_type === t && <Ionicons name="checkmark-circle" size={18} color={lt.color} />}
                 </TouchableOpacity>
               );
@@ -541,6 +587,7 @@ const s = StyleSheet.create({
   },
   emptyBtnText: { color: '#fff', fontWeight: '700', fontSize: 14 },
   list: { padding: 14, gap: 12 },
+  sectionTitle: { fontSize: 15, fontWeight: '800', color: C.text, marginHorizontal: 18, marginTop: 8 },
   leaveCard: {
     flexDirection: 'row', backgroundColor: C.surface, borderRadius: 18, overflow: 'hidden',
     shadowColor: '#000', shadowOpacity: 0.06, shadowRadius: 10, elevation: 3,
@@ -586,6 +633,7 @@ const s = StyleSheet.create({
   },
   formGroup: { marginBottom: 16 },
   formLabel: { fontSize: 13, fontWeight: '600', color: C.text, marginBottom: 7 },
+  formHint: { fontSize: 12, color: C.muted, lineHeight: 17, marginTop: 7 },
   inputWrap: {
     flexDirection: 'row', alignItems: 'center',
     borderWidth: 1.5, borderColor: C.border, borderRadius: 14,

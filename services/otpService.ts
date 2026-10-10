@@ -48,17 +48,35 @@ export async function recordCurrentPassword(password: string) {
   return { error };
 }
 
+/** Pull the { error } message out of a failed functions.invoke response. */
+async function invokeErrorMessage(error: any, fallback: string) {
+  let msg = error?.message || '';
+  try {
+    const body = await error?.context?.clone().json();
+    msg = body?.error || body?.message || msg;
+  } catch (_) {}
+  return msg || fallback;
+}
+
 /**
- * Send a 6-digit OTP to the given email via the shared send-otp edge function
- * (custom otp_table + Nodemailer, not Supabase's built-in passwordless OTP) — the
- * same backend the website uses for both login and signup, so behavior (rate
- * limiting, expiry, delivery) matches exactly on both surfaces.
+ * Send a 6-digit OTP via the same edge functions the website uses, so rate
+ * limits, expiry and delivery match on both surfaces:
+ *   email  -> send-otp (custom otp_table + Nodemailer)
+ *   mobile -> send-sms-otp (MSG91; login / password reset only, the number
+ *             must belong to exactly one active account)
+ * verify-otp handles both: a 10-digit identifier is checked as an SMS code.
  */
 export async function sendOtp(identifier: string, isSignup = false): Promise<{ type: string; identifier: string }> {
   const id = (identifier || '').trim();
   const type = detectIdentifierType(id);
-  if (!type) throw new Error('Please enter a valid email address.');
-  if (type !== 'email') throw new Error('Phone OTP is not supported. Please use email.');
+  if (!type) throw new Error('Please enter a valid email address or 10-digit mobile number.');
+
+  if (type === 'phone') {
+    if (isSignup) throw new Error('Please sign up with your email address.');
+    const { data, error } = await supabase.functions.invoke('send-sms-otp', { body: { phone: id } });
+    if (error) throw new Error(await invokeErrorMessage(error, 'Failed to send OTP. Please try again.'));
+    return { type: 'phone', identifier: data?.identifier || id };
+  }
 
   const resolvedId = id.toLowerCase();
 
@@ -67,14 +85,7 @@ export async function sendOtp(identifier: string, isSignup = false): Promise<{ t
       body: { identifier: resolvedId, type: 'email', isSignup },
     });
 
-    if (error) {
-      let msg = error.message || '';
-      try {
-        const body = await (error as any).context?.clone().json();
-        msg = body?.error || body?.message || msg;
-      } catch (_) {}
-      throw new Error(msg || 'Failed to send OTP. Please try again.');
-    }
+    if (error) throw new Error(await invokeErrorMessage(error, 'Failed to send OTP. Please try again.'));
 
     return { type: 'email', identifier: resolvedId };
   } catch (err: any) {
