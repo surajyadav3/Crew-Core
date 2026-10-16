@@ -6,6 +6,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '@/context/AuthContext';
+import { useMyShift, type MyShift } from '@/hooks/useMyShift';
 import { useFeatures } from '@/context/FeatureContext';
 import { useForegroundRefresh } from '@/hooks/useForegroundRefresh';
 import { listMySpecialRequests, submitSpecialRequest } from '@/services/specialRequestService';
@@ -13,6 +14,8 @@ import { submitRegularizeRequest, listMyRegularizeRequests } from '@/services/at
 import { fetchMyQuota } from '@/services/requestQuotaService';
 import { showToast } from '@/components/Toast';
 import RegularizeExtensionNotice from '@/components/RegularizeExtensionNotice';
+import DayPicker from '@/components/DayPicker';
+import PageHeader from '@/components/PageHeader';
 import {
   todayStr, fmtDate, fmtTime12, fmt, regularizeMinDate, regularizeWindowLabel,
   HIGH_SALARY_THRESHOLD, calcPayableOvertimeHours, calcOtPay, isRaniwalaTenant,
@@ -68,10 +71,10 @@ const TYPE_COLORS: Record<string, { color: string; bg: string }> = {
   Regularize: { color: C.purple, bg: '#EDE9FE' },
 };
 
-function calcShiftHours(tenant: any) {
-  if (!tenant?.shift_start || !tenant?.shift_end) return 8;
-  const [sh, sm] = tenant.shift_start.split(':').map(Number);
-  const [eh, em] = tenant.shift_end.split(':').map(Number);
+function calcShiftHours(shift: MyShift) {
+  if (!shift.start || !shift.end) return 8;
+  const [sh, sm] = shift.start.split(':').map(Number);
+  const [eh, em] = shift.end.split(':').map(Number);
   let from = sh * 60 + sm, to = eh * 60 + em;
   if (to <= from) to += 1440;
   return (to - from) / 60;
@@ -90,6 +93,7 @@ const EMPTY_SPECIAL = {
 
 function SpecialTab({ onOpenModal, onRefresh }: { onOpenModal: (open: () => void) => void; onRefresh: (fn: () => Promise<void>) => void }) {
   const { profile, tenant } = useAuth();
+  const myShift = useMyShift();
   const isOtEligible = (profile?.ctc || 0) > 0 && (profile?.ctc || 0) < HIGH_SALARY_THRESHOLD;
   const [requests, setRequests] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -134,7 +138,7 @@ function SpecialTab({ onOpenModal, onRefresh }: { onOpenModal: (open: () => void
       const totalOtMin = form.request_type === 'Salary Overtime'
         ? (form.ot_hours || 0) * 60 + (form.ot_minutes || 0) : null;
       const payableHours = totalOtMin != null ? calcPayableOvertimeHours(totalOtMin) : null;
-      const shiftHrs = calcShiftHours(tenant);
+      const shiftHrs = calcShiftHours(myShift);
       const storedOtPay = form.request_type === 'Salary Overtime'
         ? calcOtPay(profile?.ctc || 0, shiftHrs, payableHours || 0) : null;
       const payload = {
@@ -163,10 +167,10 @@ function SpecialTab({ onOpenModal, onRefresh }: { onOpenModal: (open: () => void
 
   const SPECIAL_TYPES = ['Overtime', ...(isOtEligible ? ['Salary Overtime'] : []), 'Late Arrival'];
   const LATE_HOUR_OPTIONS = ['0-10 min', '10-30 min', '30min-1hr', '1+ hour'];
-  const shiftEndLabel = tenant?.shift_end ? fmtTime12(tenant.shift_end) : null;
+  const shiftEndLabel = myShift.end ? fmtTime12(myShift.end) : null;
   const totalOtMin = (form.ot_hours || 0) * 60 + (form.ot_minutes || 0);
   const payableHours = calcPayableOvertimeHours(totalOtMin);
-  const shiftHrs = calcShiftHours(tenant);
+  const shiftHrs = calcShiftHours(myShift);
   const otPay = calcOtPay(profile?.ctc || 0, shiftHrs, payableHours);
 
   return (
@@ -340,8 +344,9 @@ const EMPTY_REG = { date: todayStr(), clockInTime: '', clockOutTime: '', reason:
 
 function RegularizeTab({ onOpenModal, onRefresh }: { onOpenModal: (open: () => void) => void; onRefresh: (fn: () => Promise<void>) => void }) {
   const { profile, tenant } = useAuth();
-  const tenantRef = useRef(tenant);
-  tenantRef.current = tenant;
+  const myShift = useMyShift();
+  const shiftRef = useRef(myShift);
+  shiftRef.current = myShift;
   const [requests, setRequests] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [showModal, setShowModal] = useState(false);
@@ -372,8 +377,8 @@ function RegularizeTab({ onOpenModal, onRefresh }: { onOpenModal: (open: () => v
   useEffect(() => { onRefresh(fetchData); }, [fetchData]);
 
   const openModal = useCallback(() => {
-    const t = tenantRef.current;
-    setForm({ date: todayStr(), clockInTime: t?.shift_start || '', clockOutTime: t?.shift_end || '', reason: '' });
+    const sh = shiftRef.current;
+    setForm({ date: todayStr(), clockInTime: sh.start || '', clockOutTime: sh.end || '', reason: '' });
     setShowModal(true);
   }, []);
   useEffect(() => { onOpenModal(openModal); }, []);
@@ -463,14 +468,17 @@ function RegularizeTab({ onOpenModal, onRefresh }: { onOpenModal: (open: () => v
             <ScrollView showsVerticalScrollIndicator={false}>
               <View style={s.infoBanner}>
                 <Ionicons name="information-circle-outline" size={14} color={C.primary} />
-                <Text style={s.infoText}>Request a correction for a missed or incorrect punch — allowed for {regularizeWindowLabel(tenant)} only. It goes to your manager for approval, and HR gets a copy (either can approve).</Text>
+                <Text style={s.infoText}>Correct a missed or wrong punch for {regularizeWindowLabel(tenant)}. It goes to your reporting manager for approval and HR gets a copy — either of them can approve it.</Text>
               </View>
               <View style={s.formGroup}>
-                <Text style={s.formLabel}>Date</Text>
-                <TextInput style={s.input} value={form.date}
-                  onChangeText={(v) => setForm((f) => ({ ...f, date: v }))}
-                  placeholder="YYYY-MM-DD" placeholderTextColor={C.muted}
-                  keyboardType="numeric" maxLength={10} />
+                <Text style={s.formLabel}>Date · {fmtDate(form.date)}</Text>
+                {/* Any allowed day — at Raniwala the whole current month (tenants.regularize_current_month). */}
+                <DayPicker
+                  value={form.date}
+                  min={regularizeMinDate(tenant)}
+                  max={todayStr()}
+                  onChange={(ds) => setForm((f) => ({ ...f, date: ds }))}
+                />
               </View>
               <View style={s.row}>
                 <View style={[s.formGroup, { flex: 1 }]}>
@@ -596,16 +604,16 @@ export default function RequestsScreen() {
 
   return (
     <SafeAreaView style={s.safe} edges={['top']}>
-      <View style={s.header}>
-        <View>
-          <Text style={s.title}>My Requests</Text>
-          <Text style={s.subtitle}>{availableTabs.includes('special') ? 'Overtime, late arrival & attendance' : 'Attendance regularization'}</Text>
-        </View>
-        <TouchableOpacity style={s.addBtn} onPress={openNew} activeOpacity={0.85}>
-          <Ionicons name="add" size={20} color="#fff" />
-          <Text style={s.addBtnText}>New</Text>
-        </TouchableOpacity>
-      </View>
+      <PageHeader
+        title="My Requests"
+        subtitle={availableTabs.includes('special') ? 'Overtime, late arrival & attendance' : 'Attendance regularization'}
+        right={(
+          <TouchableOpacity style={s.addBtn} onPress={openNew} activeOpacity={0.85}>
+            <Ionicons name="add" size={18} color="#fff" />
+            <Text style={s.addBtnText}>New</Text>
+          </TouchableOpacity>
+        )}
+      />
 
       {/* Tab switcher */}
       {availableTabs.length > 1 && (
@@ -641,35 +649,25 @@ export default function RequestsScreen() {
 }
 
 const s = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: C.dark },
+  safe: { flex: 1, backgroundColor: C.surface },
   scroll: { flex: 1, backgroundColor: C.bg },
-  header: {
-    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
-    paddingHorizontal: 20, paddingTop: 18, paddingBottom: 14, backgroundColor: C.dark,
-  },
-  title: { fontSize: 24, fontWeight: '900', color: '#fff' },
-  subtitle: { fontSize: 13, color: 'rgba(255,255,255,0.4)', marginTop: 2 },
   addBtn: {
-    flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: C.primary,
-    paddingHorizontal: 16, paddingVertical: 10, borderRadius: 14,
-    shadowColor: C.primary, shadowOpacity: 0.4, shadowRadius: 10, elevation: 5,
+    flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: C.primary,
+    paddingHorizontal: 14, paddingVertical: 9, borderRadius: 10,
   },
-  addBtnText: { color: '#fff', fontSize: 14, fontWeight: '700' },
+  addBtnText: { color: '#fff', fontSize: 13.5, fontWeight: '700' },
+  // The website's tab strip: white bar, active tab underlined in primary.
   tabContainer: {
-    flexDirection: 'row', backgroundColor: C.dark,
-    paddingHorizontal: 14, paddingBottom: 14, gap: 8,
+    flexDirection: 'row', backgroundColor: C.surface,
+    paddingHorizontal: 12, borderBottomWidth: 1, borderBottomColor: C.border,
   },
   tabItem: {
     flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7,
-    paddingVertical: 10, borderRadius: 14, backgroundColor: 'rgba(255,255,255,0.06)',
-    borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)',
+    paddingVertical: 12, borderBottomWidth: 2, borderBottomColor: 'transparent',
   },
-  tabItemActive: {
-    backgroundColor: C.primaryBg, borderColor: C.primary,
-    shadowColor: C.primary, shadowOpacity: 0.2, shadowRadius: 8, elevation: 3,
-  },
-  tabLabel: { fontSize: 13, fontWeight: '600', color: C.muted },
-  tabLabelActive: { color: C.primary },
+  tabItemActive: { borderBottomColor: C.primary },
+  tabLabel: { fontSize: 13.5, fontWeight: '600', color: C.muted },
+  tabLabelActive: { color: C.primary, fontWeight: '700' },
   loadingBox: { padding: 60, alignItems: 'center' },
   emptyCard: {
     margin: 14, backgroundColor: C.surface, borderRadius: 20,
@@ -690,10 +688,10 @@ const s = StyleSheet.create({
   emptyBtnText: { color: '#fff', fontWeight: '700', fontSize: 14 },
   list: { padding: 14, gap: 12 },
   reqCard: {
-    flexDirection: 'row', backgroundColor: C.surface, borderRadius: 18, overflow: 'hidden',
-    shadowColor: '#000', shadowOpacity: 0.06, shadowRadius: 10, elevation: 3,
+    flexDirection: 'row', backgroundColor: C.surface, borderRadius: 16, overflow: 'hidden',
+    borderWidth: 1, borderColor: C.border,
   },
-  reqStripe: { width: 5 },
+  reqStripe: { width: 4 },
   reqContent: { flex: 1, padding: 14, gap: 7 },
   reqTop: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   typePill: { borderRadius: 10, paddingHorizontal: 10, paddingVertical: 5 },
@@ -733,8 +731,8 @@ const s = StyleSheet.create({
   formGroup: { marginBottom: 14 },
   formLabel: { fontSize: 13, fontWeight: '600', color: C.text, marginBottom: 7 },
   input: {
-    borderWidth: 1.5, borderColor: C.border, borderRadius: 14,
-    paddingHorizontal: 14, paddingVertical: 12, fontSize: 14, color: C.text, backgroundColor: '#FAFAFA',
+    borderWidth: 1, borderColor: C.border, borderRadius: 10,
+    paddingHorizontal: 14, paddingVertical: 12, fontSize: 14, color: C.text, backgroundColor: C.surface,
   },
   textarea: { height: 88, textAlignVertical: 'top' },
   select: {

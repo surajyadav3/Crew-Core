@@ -70,13 +70,19 @@ export async function clockIn(tenantId: string, profileId: string, tenant: any, 
   // row ready; on conflict (row already exists) it's ignored and the existing
   // row's status/location are left untouched.
   const { data: profile } = await supabase.from('profiles').select('shift_id, outlet_id').eq('id', profileId).single();
-  let shiftStart = tenant?.shift_start || '09:00';
-  if (profile?.shift_id) {
-    const { data: shift } = await supabase.from('shifts').select('start_time').eq('id', profile.shift_id).single();
-    if (shift) shiftStart = shift.start_time;
-  }
+  // Shift > outlet > company — the same precedence the DB's Late recompute uses,
+  // so a factory worker on 9:30 isn't measured against the office 10:20.
+  const [{ data: shift }, { data: outlet }] = await Promise.all([
+    profile?.shift_id
+      ? supabase.from('shifts').select('start_time').eq('id', profile.shift_id).maybeSingle()
+      : Promise.resolve({ data: null as any }),
+    profile?.outlet_id
+      ? supabase.from('outlets').select('shift_start, late_threshold').eq('id', profile.outlet_id).maybeSingle()
+      : Promise.resolve({ data: null as any }),
+  ]);
+  const shiftStart: string = shift?.start_time || outlet?.shift_start || tenant?.shift_start || '09:00';
 
-  const lateMin = tenant?.late_threshold || 15;
+  const lateMin = outlet?.late_threshold ?? tenant?.late_threshold ?? 15;
   const [sh, sm] = shiftStart.split(':').map(Number);
   const now = new Date();
   const diffMin = (now.getHours() * 60 + now.getMinutes()) - (sh * 60 + sm);

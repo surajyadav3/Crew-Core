@@ -12,6 +12,7 @@ import { supabase } from '@/lib/supabase';
 import { fmt, fmtDate, fmtTime12, getTenantWeeklyOffDays, upper, personName, probationInfo } from '@/lib/helpers';
 import { getOutlet } from '@/services/tenantService';
 import { showToast } from '@/components/Toast';
+import { useMyShift } from '@/hooks/useMyShift';
 import {
   listMyVerificationRequests, submitVerificationRequest, listTeamVerificationRequests, type FieldGroup,
 } from '@/services/verificationRequestService';
@@ -116,6 +117,7 @@ function QuickLinkRow({
 
 export default function ProfileScreen() {
   const { profile, tenant, refreshProfile } = useAuth();
+  const myShift = useMyShift();
   const router = useRouter();
   const [showSalary, setShowSalary] = useState(false);
   const [showSensitive, setShowSensitive] = useState(false);
@@ -243,9 +245,11 @@ export default function ProfileScreen() {
   };
 
   const shiftLabel = () => {
-    const st = tenant?.shift_start ? fmtTime12(tenant.shift_start) : null;
-    const en = tenant?.shift_end ? fmtTime12(tenant.shift_end) : null;
-    if (st && en) return `${st} – ${en}`;
+    // The employee's own shift (assigned shift > outlet > company), not the
+    // company default — factory staff were shown the office 10:20–7:15.
+    const st = myShift.start ? fmtTime12(myShift.start) : null;
+    const en = myShift.end ? fmtTime12(myShift.end) : null;
+    if (st && en) return `${st} – ${en}${myShift.name ? ` (${myShift.name})` : ''}`;
     if (st) return `From ${st}`;
     return '—';
   };

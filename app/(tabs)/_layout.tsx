@@ -3,6 +3,7 @@ import { useEffect, useRef } from 'react';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '@/context/AuthContext';
 import { useFeatures } from '@/context/FeatureContext';
+import { useApprovals } from '@/context/ApprovalsContext';
 import ConnectingScreen from '@/components/ConnectingScreen';
 import { View, Text, Image, Animated, StyleSheet, Platform, TouchableOpacity } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -90,6 +91,7 @@ function LoadingDot({ delay }: { delay: number }) {
 export default function TabLayout() {
   const { user, profile, loading, profileStatus } = useAuth();
   const { isEnabled } = useFeatures();
+  const { isApprover, total: pendingApprovals } = useApprovals();
   const router = useRouter();
   const { bottom } = useSafeAreaInsets();
 
@@ -98,11 +100,15 @@ export default function TabLayout() {
   // A superadmin can toggle individual features on/off per company from the
   // payroll web dashboard (see FeatureContext) — mirror the web sidebar's
   // behavior by hiding a tab when the feature it houses is disabled. The tab
-  // bar itself only carries Home, Attendance, Leaves, Notices & Profile —
+  // bar itself only carries Home, Attendance, Leaves, (Team), Notices & Profile —
   // Requests, Performance and Payslips are reachable from Home's Quick
   // Actions / More Tools instead, to keep the bar from getting crowded.
   const hideAttendance = !isEnabled('attendance');
   const hideLeaves = !isEnabled('leave_requests');
+  // Managers / HODs / Management / HR get a Team tab: their approvals inbox
+  // (badge = requests waiting on them) and their team's day. Everyone else
+  // never sees it.
+  const hideTeam = !isApprover;
 
   useEffect(() => {
     if (loading) return;
@@ -171,6 +177,18 @@ export default function TabLayout() {
           href: hideLeaves ? null : undefined,
           tabBarIcon: ({ color, focused }) => (
             <TabIcon name={focused ? 'calendar' : 'calendar-outline'} color={color} focused={focused} />
+          ),
+        }}
+      />
+      <Tabs.Screen
+        name="team"
+        options={{
+          title: 'Team',
+          href: hideTeam ? null : undefined,
+          tabBarBadge: pendingApprovals > 0 ? (pendingApprovals > 99 ? '99+' : pendingApprovals) : undefined,
+          tabBarBadgeStyle: { backgroundColor: '#EF4444', fontSize: 10, fontWeight: '800' },
+          tabBarIcon: ({ color, focused }) => (
+            <TabIcon name={focused ? 'people' : 'people-outline'} color={color} focused={focused} />
           ),
         }}
       />

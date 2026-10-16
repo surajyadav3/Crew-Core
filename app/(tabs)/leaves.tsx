@@ -7,14 +7,18 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '@/context/AuthContext';
 import { useForegroundRefresh } from '@/hooks/useForegroundRefresh';
-import { listMyLeaveRequests, requestLeave, checkProbationStatus } from '@/services/leaveService';
+import { listMyLeaveRequests, requestLeave, checkProbationStatus, fetchMyHalfDayWindows } from '@/services/leaveService';
 import { fetchMyQuota } from '@/services/requestQuotaService';
 import { fetchMyLeaveBalances, fetchMyLeaveLedger, listLeaveTypes } from '@/services/leaveLedgerService';
 import { fetchMyCompOffBalance } from '@/services/compOffService';
 import { showToast } from '@/components/Toast';
+import PageHeader from '@/components/PageHeader';
 import LeaveBalanceCard, { pickEarnedBalance } from '@/components/LeaveBalanceCard';
-import { LeaveSummaryCard, LeaveTracker } from '@/components/LeaveTracker';
+import { LeaveTracker } from '@/components/LeaveTracker';
 import { fmtDate, todayStr, HIGH_SALARY_THRESHOLD, isRaniwalaTenant } from '@/lib/helpers';
+import {
+  HALF_DAY_OPTIONS, halfDayLabel, requestHalfDayLabel, clock12, type HalfDay, type HalfDayWindows,
+} from '@/lib/halfDayLeave';
 import { Colors as C } from '@/constants/Colors';
 
 type LeaveBalance = {
@@ -164,6 +168,8 @@ const EMPTY_FORM = {
   leave_type: '',
   start_date: todayStr(),
   end_date: todayStr(),
+  // '' = full day(s); 'first_half' / 'second_half' = half of one date (Raniwala).
+  half_day: '' as HalfDay,
   reason: '',
 };
 
@@ -202,6 +208,8 @@ export default function LeavesScreen() {
   const [activeLeaveTypes, setActiveLeaveTypes] = useState<any[]>([]);
   const [ledger, setLedger] = useState<any[]>([]);
   const [freshCompOff, setFreshCompOff] = useState<number | null>(null);
+  // The employee's shift split in two, for the half-day choice.
+  const [halfWindows, setHalfWindows] = useState<HalfDayWindows | null>(null);
   const activeLeaveTypeNames = activeLeaveTypes.map((t) => t.name);
 
   const raniwala = isRaniwalaTenant(tenant);
@@ -234,7 +242,7 @@ export default function LeavesScreen() {
       tenant ? fetchMyQuota(tenant.id, profile.id) : null,
       fetchMyLeaveBalances(profile.id),
       tenant ? listLeaveTypes(tenant.id) : null,
-      fetchMyLeaveLedger(profile.id),
+      raniwala ? null : fetchMyLeaveLedger(profile.id),
       fetchMyCompOffBalance(profile.id),
     ]);
     if (reqRes.error) showToast(reqRes.error.message, 'error');
@@ -245,9 +253,9 @@ export default function LeavesScreen() {
     if (typesRes && !typesRes.error) {
       setActiveLeaveTypes(typesRes.data.filter((t: any) => t.is_active));
     }
-    if (!ledgerRes.error) setLedger(ledgerRes.data);
+    if (ledgerRes && !ledgerRes.error) setLedger(ledgerRes.data);
     if (compOffRes.balance != null) setFreshCompOff(compOffRes.balance);
-  }, [profile, tenant]);
+  }, [profile, tenant, raniwala]);
 
   // Default the request form to the tenant's first active leave type, once
   // known — the hardcoded 'Casual Leave' placeholder doesn't exist for every
@@ -260,6 +268,11 @@ export default function LeavesScreen() {
 
   useForegroundRefresh(fetchRequests, setLoading);
 
+  useEffect(() => {
+    if (!showModal || !raniwala || halfWindows) return;
+    fetchMyHalfDayWindows().then(({ data }) => setHalfWindows(data));
+  }, [showModal, raniwala, halfWindows]);
+
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
     await fetchRequests();
@@ -268,15 +281,19 @@ export default function LeavesScreen() {
 
   const handleSubmit = async () => {
     if (!form.reason.trim()) { showToast('Please provide a reason.', 'error'); return; }
-    if (!form.start_date || !form.end_date) { showToast('Please select both dates.', 'error'); return; }
-    if (!DATE_RE.test(form.start_date) || !DATE_RE.test(form.end_date)) {
+    // A half day is one date; the DB stamps its times from the shift.
+    const endDate = form.half_day ? form.start_date : form.end_date;
+    if (!form.start_date || !endDate) { showToast('Please select both dates.', 'error'); return; }
+    if (!DATE_RE.test(form.start_date) || !DATE_RE.test(endDate)) {
       showToast('Dates must be in YYYY-MM-DD format.', 'error'); return;
     }
-    if (isNaN(new Date(form.start_date).getTime()) || isNaN(new Date(form.end_date).getTime())) {
+    if (isNaN(new Date(form.start_date).getTime()) || isNaN(new Date(endDate).getTime())) {
       showToast('Please enter valid calendar dates.', 'error'); return;
     }
-    if (form.end_date < form.start_date) { showToast('End date cannot be before start date.', 'error'); return; }
+    if (endDate < form.start_date) { showToast('End date cannot be before start date.', 'error'); return; }
     if (!tenant) { showToast('You do not belong to any workspace.', 'error'); return; }
+    // The type fills in once leave types load — a request without one can never be deducted.
+    if (!form.leave_type) { showToast('Please choose a leave type.', 'error'); return; }
     if (probation?.inProbation && form.leave_type !== 'Earned (Probation)') {
       showToast(`You are in probation until ${fmtDate(probation.endsOn)}. Only earned probation leaves can be used.`, 'error');
       return;
@@ -287,7 +304,7 @@ export default function LeavesScreen() {
     }
     // Same rule as the website: only Comp Off is capped by its balance.
     if (form.leave_type === 'Comp Off') {
-      const need = daysBetween(form.start_date, form.end_date);
+      const need = form.half_day ? 0.5 : daysBetween(form.start_date, endDate);
       if (need > compOffBalance) {
         showToast(`You have ${compOffBalance} comp off day${compOffBalance === 1 ? '' : 's'} — this request needs ${need}.`, 'error');
         return;
@@ -295,8 +312,13 @@ export default function LeavesScreen() {
     }
     setSaving(true);
     try {
-      const payload = { ...form, profile_id: profile!.id, tenant_id: tenant.id, status: 'Pending' };
-      const days = daysBetween(form.start_date, form.end_date);
+      // half_day only goes out when a half is picked, so a full-day leave
+      // never depends on that column.
+      const { half_day, ...rest } = form;
+      const payload = {
+        ...rest, end_date: endDate, ...(half_day ? { half_day } : {}),
+        profile_id: profile!.id, tenant_id: tenant.id, status: 'Pending',
+      };
       const { error, tier } = await requestLeave(payload);
       if (error) {
         showToast(error.message || 'Failed to submit leave request.', 'error');
@@ -326,16 +348,18 @@ export default function LeavesScreen() {
   return (
     <SafeAreaView style={s.safe} edges={['top']}>
       {/* Header */}
-      <View style={s.header}>
-        <View>
-          <Text style={s.title}>My Leaves</Text>
-          <Text style={s.subtitle}>Requests & history</Text>
-        </View>
-        <TouchableOpacity style={s.addBtn} onPress={() => setShowModal(true)} activeOpacity={0.85}>
-          <Ionicons name="add" size={20} color="#fff" />
-          <Text style={s.addBtnText}>Request</Text>
-        </TouchableOpacity>
-      </View>
+      <PageHeader
+        title="My Leaves"
+        subtitle='Requests & history'
+        right={(
+          <>
+          <TouchableOpacity style={s.addBtn} onPress={() => setShowModal(true)} activeOpacity={0.85}>
+            <Ionicons name="add" size={20} color="#fff" />
+            <Text style={s.addBtnText}>Request</Text>
+          </TouchableOpacity>
+          </>
+        )}
+      />
 
       <ScrollView style={s.scroll} showsVerticalScrollIndicator={false}
         contentContainerStyle={{ paddingBottom: 140 }}
@@ -366,19 +390,11 @@ export default function LeavesScreen() {
         {raniwala && !probation?.inProbation
           ? <LeaveBalanceCard earned={earned} compOff={compOffBalance} />
           : <LeaveBalanceRow balances={balances} />}
-        {raniwala && !probation?.inProbation && (
-          <LeaveSummaryCard
-            ledger={ledger}
-            requests={requests}
-            earnedTypeId={activeLeaveTypes.find((t) => t.name === earnedTypeName)?.id}
-            earnedTypeName={earnedTypeName}
-            unpaidTypeName={UNPAID_LEAVE_TYPE}
-            compOffBalance={compOffBalance}
-          />
-        )}
-        {!probation?.inProbation && (
+        {/* Raniwala: just the Earned Leave + Comp Off balances (Leave Wallet
+            above) — no monthly summary or ledger statement. */}
+        {!probation?.inProbation && !raniwala && (
           <LeaveTracker
-            leaveTypes={raniwala ? activeLeaveTypes.filter((t) => [earnedTypeName, UNPAID_LEAVE_TYPE].includes(t.name)) : activeLeaveTypes}
+            leaveTypes={activeLeaveTypes}
             ledger={ledger}
             requests={requests}
             compOffBalance={compOffEligible ? compOffBalance : null}
@@ -405,6 +421,7 @@ export default function LeavesScreen() {
               const ss = STATUS_STYLE[req.status] || STATUS_STYLE['Pending'];
               const lt = LEAVE_COLORS[req.leave_type] || { color: C.primary, bg: C.primaryBg };
               const days = daysBetween(req.start_date, req.end_date);
+              const half = requestHalfDayLabel(req);
               return (
                 <View key={req.id} style={s.leaveCard}>
                   <View style={[s.leaveStripe, { backgroundColor: lt.color }]} />
@@ -420,11 +437,14 @@ export default function LeavesScreen() {
                     </View>
                     <View style={s.datesRow}>
                       <Ionicons name="calendar-outline" size={13} color={C.muted} />
-                      <Text style={s.datesText}>{fmtDate(req.start_date)} — {fmtDate(req.end_date)}</Text>
+                      <Text style={s.datesText}>
+                        {half ? fmtDate(req.start_date) : `${fmtDate(req.start_date)} — ${fmtDate(req.end_date)}`}
+                      </Text>
                       <View style={s.daysBadge}>
-                        <Text style={s.daysText}>{days}d</Text>
+                        <Text style={s.daysText}>{half ? '½d' : `${days}d`}</Text>
                       </View>
                     </View>
+                    {!!half && <Text style={s.halfText}>{half}</Text>}
                     {raniwala && req.manager_status != null && (
                       <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}>
                         {stagePill('Manager', req.manager_status)}
@@ -482,14 +502,52 @@ export default function LeavesScreen() {
                 )}
               </View>
 
-              <View style={s.row}>
-                <View style={{ flex: 1 }}>
-                  <DateInput label="Start Date" value={form.start_date} onChange={(v) => setForm((f) => ({ ...f, start_date: v }))} />
+              {raniwala && !probation?.inProbation && (
+                <View style={s.formGroup}>
+                  <Text style={s.formLabel}>Duration</Text>
+                  <View style={s.chipRow}>
+                    {HALF_DAY_OPTIONS.map((o) => {
+                      const active = form.half_day === o.value;
+                      const w = o.value ? halfWindows?.[o.value] : null;
+                      return (
+                        <TouchableOpacity
+                          key={o.value || 'full'}
+                          style={[s.chip, active && s.chipActive]}
+                          onPress={() => setForm((f) => ({ ...f, half_day: o.value }))}
+                          activeOpacity={0.8}
+                        >
+                          <Text style={[s.chipText, active && s.chipTextActive]}>{o.label}</Text>
+                          {!!w && (
+                            <Text style={[s.chipTime, active && s.chipTextActive]}>{clock12(w.from)} – {clock12(w.to)}</Text>
+                          )}
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
+                  {!!form.half_day && (
+                    <Text style={s.formHint}>
+                      Half a day of leave (0.5 day).
+                      {halfWindows?.shift_start
+                        ? ` Your shift: ${clock12(halfWindows.shift_start)} – ${clock12(halfWindows.shift_end)}${halfWindows.shift_name ? ` (${halfWindows.shift_name})` : ''}.`
+                        : ''}
+                      {' '}Work the other half as usual.
+                    </Text>
+                  )}
                 </View>
-                <View style={{ flex: 1 }}>
-                  <DateInput label="End Date" value={form.end_date} onChange={(v) => setForm((f) => ({ ...f, end_date: v }))} />
+              )}
+
+              {form.half_day ? (
+                <DateInput label="Date" value={form.start_date} onChange={(v) => setForm((f) => ({ ...f, start_date: v, end_date: v }))} />
+              ) : (
+                <View style={s.row}>
+                  <View style={{ flex: 1 }}>
+                    <DateInput label="Start Date" value={form.start_date} onChange={(v) => setForm((f) => ({ ...f, start_date: v }))} />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <DateInput label="End Date" value={form.end_date} onChange={(v) => setForm((f) => ({ ...f, end_date: v }))} />
+                  </View>
                 </View>
-              </View>
+              )}
 
               <View style={s.formGroup}>
                 <Text style={s.formLabel}>Reason</Text>
@@ -548,7 +606,7 @@ export default function LeavesScreen() {
 }
 
 const s = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: C.dark },
+  safe: { flex: 1, backgroundColor: C.surface },
   scroll: { flex: 1, backgroundColor: C.bg },
   header: {
     flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
@@ -558,10 +616,9 @@ const s = StyleSheet.create({
   subtitle: { fontSize: 13, color: 'rgba(255,255,255,0.4)', marginTop: 2 },
   addBtn: {
     flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: C.primary,
-    paddingHorizontal: 16, paddingVertical: 10, borderRadius: 14,
-    shadowColor: C.primary, shadowOpacity: 0.4, shadowRadius: 10, elevation: 5,
+    paddingHorizontal: 14, paddingVertical: 9, borderRadius: 10,
   },
-  addBtnText: { color: '#fff', fontSize: 14, fontWeight: '700' },
+  addBtnText: { color: '#fff', fontSize: 13.5, fontWeight: '700' },
   infoBanner: {
     flexDirection: 'row', alignItems: 'flex-start', gap: 10,
     borderLeftWidth: 3, borderRadius: 12, padding: 12,
@@ -607,6 +664,7 @@ const s = StyleSheet.create({
     borderWidth: 1, borderColor: C.border,
   },
   daysText: { fontSize: 11, color: C.muted, fontWeight: '700' },
+  halfText: { fontSize: 12, color: C.primary, fontWeight: '600' },
   reasonText: { fontSize: 12.5, color: C.muted, lineHeight: 18 },
   appliedAt: { fontSize: 11, color: '#CBD5E1' },
 
@@ -655,6 +713,15 @@ const s = StyleSheet.create({
   selectText: { flex: 1, fontSize: 14, color: C.text, fontWeight: '500' },
   selectBal: { fontSize: 12, fontWeight: '700', color: C.primary },
   row: { flexDirection: 'row', gap: 12, marginBottom: 0 },
+  chipRow: { flexDirection: 'row', gap: 8 },
+  chip: {
+    flex: 1, borderWidth: 1.5, borderColor: C.border, borderRadius: 12,
+    paddingVertical: 9, paddingHorizontal: 6, alignItems: 'center', backgroundColor: '#FAFAFA',
+  },
+  chipActive: { borderColor: C.primary, backgroundColor: C.primaryBg },
+  chipText: { fontSize: 12.5, fontWeight: '700', color: C.text },
+  chipTime: { fontSize: 10, color: C.muted, marginTop: 2 },
+  chipTextActive: { color: C.primary },
   modalFooter: { flexDirection: 'row', gap: 12, marginTop: 8, paddingBottom: 12 },
   cancelBtn: {
     flex: 1, borderWidth: 1.5, borderColor: C.border, borderRadius: 14,

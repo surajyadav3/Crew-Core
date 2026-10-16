@@ -9,6 +9,8 @@ import { useRouter } from 'expo-router';
 import { useFocusEffect } from '@react-navigation/native';
 import { useAuth } from '@/context/AuthContext';
 import { useFeatures } from '@/context/FeatureContext';
+import { useApprovals } from '@/context/ApprovalsContext';
+import { approvalRouteForNotification, kindInfo } from '@/lib/approvals';
 import { useClockInOut } from '@/hooks/useClockInOut';
 import { fetchMyMonthAttendance } from '@/services/attendanceService';
 import { listHolidays } from '@/services/holidayService';
@@ -144,6 +146,7 @@ function PulseDot({ color }: { color: string }) {
 export default function DashboardScreen() {
   const { profile, tenant } = useAuth();
   const { isEnabled } = useFeatures();
+  const approvals = useApprovals();
   const router = useRouter();
   const clock = useClockInOut();
   const raniwala = isRaniwalaTenant(tenant);
@@ -221,7 +224,7 @@ export default function DashboardScreen() {
 
   const loadAll = useCallback(async () => {
     setLoading(true);
-    await Promise.all([loadData(), loadUpdates(), clock.refresh()]);
+    await Promise.all([loadData(), loadUpdates(), clock.refresh(), approvals.refresh()]);
     setLoading(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loadData, loadUpdates]);
@@ -230,13 +233,15 @@ export default function DashboardScreen() {
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
-    await Promise.all([loadData(), loadUpdates(), clock.refresh()]);
+    await Promise.all([loadData(), loadUpdates(), clock.refresh(), approvals.refresh(true)]);
     setRefreshing(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loadData, loadUpdates]);
 
   const handleOpenUpdate = async (n: any) => {
-    if (n.type === 'verification_request_submitted') router.push('/team-verification' as any);
+    const approvalRoute = approvals.isApprover ? approvalRouteForNotification(n) : null;
+    if (approvalRoute) router.push(approvalRoute as any);
+    else if (n.type === 'verification_request_submitted') router.push('/team-verification' as any);
     if (n.is_read) return;
     const { error } = await markNotificationRead(n.id);
     if (error) return;
@@ -341,6 +346,33 @@ export default function DashboardScreen() {
           <>
             {/* ── Announcements first (Raniwala — mirrors its website Home) ── */}
             {raniwala && <AnnouncementsSection />}
+
+            {/* ── Team approvals (manager / HOD / management / HR) ─────────── */}
+            {approvals.kinds.length > 0 && (
+              <AnimatedCard delay={60}>
+                <TouchableOpacity
+                  style={[s.approvalCard, approvals.total > 0 && s.approvalCardHot]}
+                  onPress={() => router.push((approvals.total > 0 ? '/approvals' : '/team') as any)}
+                  activeOpacity={0.85}
+                >
+                  <View style={[s.approvalIcon, { backgroundColor: approvals.total > 0 ? C.primary : C.successBg }]}>
+                    <Ionicons name={approvals.total > 0 ? 'file-tray-full' : 'checkmark-done'} size={20} color={approvals.total > 0 ? '#fff' : C.success} />
+                  </View>
+                  <View style={{ flex: 1, minWidth: 0 }}>
+                    <Text style={s.approvalTitle}>
+                      {approvals.total > 0 ? `${approvals.total} team request${approvals.total !== 1 ? 's' : ''} waiting` : 'No team requests waiting'}
+                    </Text>
+                    <Text style={s.approvalSub} numberOfLines={1}>
+                      {approvals.total > 0
+                        ? approvals.kinds.filter((k) => (approvals.counts[k] || 0) > 0)
+                          .map((k) => `${approvals.counts[k]} ${kindInfo(k).short}`).join(' · ')
+                        : 'Open your team to see who is in today'}
+                    </Text>
+                  </View>
+                  <Ionicons name="chevron-forward" size={16} color={C.muted} />
+                </TouchableOpacity>
+              </AnimatedCard>
+            )}
 
             {/* ── Today's Status Card ─────────────────────────────────── */}
             <AnimatedCard delay={100} style={s.todayCard}>
@@ -698,6 +730,15 @@ const s = StyleSheet.create({
   viewAttendanceLinkText: { fontSize: 12.5, fontWeight: '700', color: C.primary },
 
   // Section label
+  approvalCard: {
+    flexDirection: 'row', alignItems: 'center', gap: 12, marginHorizontal: 16, marginTop: 4, marginBottom: 12,
+    backgroundColor: C.surface, borderRadius: 18, padding: 14, borderWidth: 1.5, borderColor: 'transparent',
+    shadowColor: '#000', shadowOpacity: 0.06, shadowRadius: 12, elevation: 3,
+  },
+  approvalCardHot: { borderColor: C.primaryLight },
+  approvalIcon: { width: 42, height: 42, borderRadius: 13, alignItems: 'center', justifyContent: 'center' },
+  approvalTitle: { fontSize: 14.5, fontWeight: '900', color: C.text },
+  approvalSub: { fontSize: 12, color: C.muted, marginTop: 2 },
   sectionLabel: {
     fontSize: 11.5, fontWeight: '700', color: C.muted,
     textTransform: 'uppercase', letterSpacing: 1,

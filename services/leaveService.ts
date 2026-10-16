@@ -1,6 +1,7 @@
 import { supabase } from '@/lib/supabase';
 import { getOrCreateQuota, determineApproverRole } from './requestQuotaService';
 import { notifyProfiles, notifyRoles, getRequesterLabel } from './notificationService';
+import type { HalfDayWindows } from '@/lib/halfDayLeave';
 
 export async function listMyLeaveRequests(profileId: string) {
   const { data, error } = await supabase
@@ -9,6 +10,15 @@ export async function listMyLeaveRequests(profileId: string) {
     .eq('profile_id', profileId)
     .order('start_date', { ascending: false });
   return { data: data || [], error };
+}
+
+/**
+ * The signed-in employee's shift split in two, for a half-day leave (web repo
+ * migration 20261013_2): { shift_name, shift_start, shift_end, first_half, second_half }.
+ */
+export async function fetchMyHalfDayWindows() {
+  const { data, error } = await supabase.rpc('my_leave_half_day_windows');
+  return { data: (data || null) as HalfDayWindows | null, error };
 }
 
 export async function checkProbationStatus(profileId: string) {
@@ -39,6 +49,8 @@ export async function requestLeave(payload: {
   leave_type: string;
   start_date: string;
   end_date: string;
+  // null = full day(s); 'first_half' / 'second_half' = half of one date.
+  half_day?: string | null;
   reason: string;
   profile_id: string;
   tenant_id: string;

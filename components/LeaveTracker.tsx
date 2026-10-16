@@ -1,12 +1,10 @@
 import React, { useState } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 import { Colors as C } from '@/constants/Colors';
-import { dateStr, fmtDate, monthLabel } from '@/lib/helpers';
+import { fmtDate } from '@/lib/helpers';
 
-// Ports of the website's Leave Summary card (src/pages/employee/MyLeavesPage.jsx)
-// and Leave Tracker (src/components/LeaveTracker.jsx), so an employee sees the
-// same figures in the app and on the web.
+// Port of the website's Leave Tracker (src/components/LeaveTracker.jsx), so an
+// employee sees the same figures in the app and on the web.
 
 const COMP_OFF = 'Comp Off';
 const ROWS_SHOWN = 8;
@@ -38,35 +36,6 @@ function entryLabel(e: any) {
   return e.entry_type;
 }
 
-/**
- * How this month's Earned Leave balance was reached: what the employee started
- * the month with, what was credited, used, and already approved for a later
- * month. An approved leave is ONE ledger row dated on its first day, so it is
- * spread over the leave's own dates — a leave across a month end counts in each.
- */
-export function earnedLeaveSummary(ledger: any[], requests: any[]) {
-  const now = new Date();
-  const monthStart = dateStr(new Date(now.getFullYear(), now.getMonth(), 1));
-  const monthEnd = dateStr(new Date(now.getFullYear(), now.getMonth() + 1, 0));
-  const reqById = new Map(requests.map((r) => [r.id, r]));
-  const s = { opening: 0, credited: 0, used: 0, booked: 0 };
-  const add = (date: string, days: number) => {
-    if (date < monthStart) s.opening += days;
-    else if (days >= 0) s.credited += days;
-    else if (date > monthEnd) s.booked -= days;
-    else s.used -= days;
-  };
-  ledger.forEach((row) => {
-    const days = Number(row.days) || 0;
-    const req = reqById.get(row.leave_request_id);
-    if (!req) { add(row.effective_date, days); return; }
-    const [sy, sm, sd] = req.start_date.split('-').map(Number);
-    const span = requestDays(req);
-    for (let i = 0; i < span; i++) add(dateStr(new Date(sy, sm - 1, sd + i)), days / span);
-  });
-  return { ...s, available: s.opening + s.credited - s.used - s.booked };
-}
-
 function Figure({ label, value, sign = '', tone, strong }: {
   label: string; value: number; sign?: string; tone?: string; strong?: boolean;
 }) {
@@ -76,64 +45,6 @@ function Figure({ label, value, sign = '', tone, strong }: {
       <Text style={[s.figureValue, strong && { fontSize: 22 }, !!tone && { color: tone }]}>
         {sign}{fmtDays(value)}<Text style={s.figureUnit}> {dayWord(value)}</Text>
       </Text>
-    </View>
-  );
-}
-
-/** Raniwala's "Leave Summary — <month>": Earned Leave this month, Unpaid Leave, Comp Off. */
-export function LeaveSummaryCard({ ledger, requests, earnedTypeId, earnedTypeName, unpaidTypeName, compOffBalance }: {
-  ledger: any[]; requests: any[]; earnedTypeId?: string; earnedTypeName: string; unpaidTypeName: string; compOffBalance: number;
-}) {
-  const sum = earnedLeaveSummary(ledger.filter((l) => l.leave_type_id === earnedTypeId), requests);
-  const now = new Date();
-  const thisYear = now.getFullYear();
-  const daysOf = (type: string, status: string) => requests
-    .filter((r) => r.leave_type === type && r.status === status)
-    .reduce((n, r) => n + requestDays(r), 0);
-  const earnedPending = daysOf(earnedTypeName, 'Pending');
-  const unpaidPending = daysOf(unpaidTypeName, 'Pending');
-  const unpaidTaken = requests
-    .filter((r) => r.leave_type === unpaidTypeName && r.status === 'Approved' && new Date(r.start_date).getFullYear() === thisYear)
-    .reduce((n, r) => n + requestDays(r), 0);
-  const monthShort = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][now.getMonth()];
-
-  return (
-    <View style={s.card}>
-      <Text style={s.cardTitle}>Leave Summary — {monthLabel(now.getMonth(), thisYear)}</Text>
-      <Text style={s.subTitle}>Earned Leave</Text>
-      <View style={s.figures}>
-        <Figure label={`Balance on 1 ${monthShort}`} value={sum.opening} />
-        <Figure label="Credited this month" value={sum.credited} sign="+" tone={C.success} />
-        <Figure label="Used this month" value={sum.used} sign={sum.used ? '−' : ''} tone={sum.used ? C.danger : undefined} />
-        <Figure label="Approved for later" value={sum.booked} sign={sum.booked ? '−' : ''} tone={sum.booked ? C.danger : undefined} />
-        <Figure label="Available now" value={sum.available} strong tone={sum.available < 0 ? C.danger : C.success} />
-      </View>
-      {earnedPending > 0 && (
-        <View style={s.hintRow}>
-          <Ionicons name="hourglass-outline" size={13} color={C.muted} />
-          <Text style={s.hint}>
-            {fmtDays(earnedPending)} {dayWord(earnedPending)} of Earned Leave awaiting approval — deducted only once approved.
-          </Text>
-        </View>
-      )}
-      <View style={s.splitRow}>
-        <View style={{ flex: 1 }}>
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-            <Text style={s.subTitle}>Unpaid Leave</Text>
-            <Text style={s.lopBadge}>Loss of Pay</Text>
-          </View>
-          <Text style={s.splitText}>
-            <Text style={{ fontWeight: '800' }}>{fmtDays(unpaidTaken)}</Text> {dayWord(unpaidTaken)} taken this year
-          </Text>
-          {unpaidPending > 0 && <Text style={s.splitMuted}>{fmtDays(unpaidPending)} awaiting approval</Text>}
-        </View>
-        <View style={{ flex: 1 }}>
-          <Text style={s.subTitle}>Comp Off</Text>
-          <Text style={s.splitText}>
-            <Text style={{ fontWeight: '800' }}>{fmtDays(compOffBalance)}</Text> {dayWord(compOffBalance)} available
-          </Text>
-        </View>
-      </View>
     </View>
   );
 }
@@ -287,21 +198,12 @@ const s = StyleSheet.create({
     shadowColor: '#000', shadowOpacity: 0.05, shadowRadius: 10, elevation: 2,
   },
   cardTitle: { fontSize: 15, fontWeight: '800', color: C.text, marginBottom: 10 },
-  subTitle: { fontSize: 12, fontWeight: '700', color: C.muted, marginBottom: 6 },
   figures: { flexDirection: 'row', flexWrap: 'wrap', rowGap: 10 },
   figure: { width: '50%', paddingRight: 8 },
   figureLabel: { fontSize: 9.5, fontWeight: '700', color: C.muted, textTransform: 'uppercase', letterSpacing: 0.3 },
   figureValue: { fontSize: 17, fontWeight: '800', color: C.text, marginTop: 2 },
   figureUnit: { fontSize: 11, fontWeight: '500', color: C.muted },
-  hintRow: { flexDirection: 'row', gap: 6, alignItems: 'flex-start', marginTop: 10 },
   hint: { flex: 1, fontSize: 12, color: C.muted, lineHeight: 17, marginTop: 4 },
-  splitRow: { flexDirection: 'row', gap: 12, borderTopWidth: 1, borderTopColor: C.border, marginTop: 14, paddingTop: 12 },
-  splitText: { fontSize: 13, color: C.text },
-  splitMuted: { fontSize: 12, color: C.muted, marginTop: 2 },
-  lopBadge: {
-    fontSize: 9, fontWeight: '700', color: C.warning, backgroundColor: C.warningBg,
-    borderRadius: 6, paddingHorizontal: 6, paddingVertical: 1, marginBottom: 6, overflow: 'hidden',
-  },
   tabs: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 14 },
   tab: { borderWidth: 1.5, borderColor: C.border, borderRadius: 10, paddingHorizontal: 10, paddingVertical: 6 },
   tabActive: { backgroundColor: C.primary, borderColor: C.primary },

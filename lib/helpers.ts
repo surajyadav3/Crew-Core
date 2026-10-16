@@ -156,10 +156,23 @@ export const regularizeExtension = (tenant: any): { from: string; until: string 
 
 const fmtDayMonth = (s: string) => new Date(s + 'T00:00:00').toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
 
-export const regularizeMinDate = (tenant: any) => {
+/**
+ * tenants.regularize_current_month (web repo migration
+ * 20261011_3_regularize_current_month.sql): any day since the 1st of the
+ * current month may be regularized, never fewer days than the normal N-day
+ * window. Mirrors the website's src/lib/helpers.js.
+ */
+const regularizeNormalMinDate = (tenant: any) => {
   const d = new Date();
   d.setDate(d.getDate() - (regularizeWindowDays(tenant) - 1));
   const normal = dateStr(d);
+  if (!tenant?.regularize_current_month) return normal;
+  const monthStart = todayStr().slice(0, 8) + '01';
+  return monthStart < normal ? monthStart : normal;
+};
+
+export const regularizeMinDate = (tenant: any) => {
+  const normal = regularizeNormalMinDate(tenant);
   const ext = regularizeExtension(tenant);
   return ext && ext.from < normal ? ext.from : normal;
 };
@@ -167,6 +180,7 @@ export const regularizeMinDate = (tenant: any) => {
 export const regularizeWindowLabel = (tenant: any) => {
   const ext = regularizeExtension(tenant);
   if (ext) return `any day from ${fmtDayMonth(ext.from)} to today`;
+  if (tenant?.regularize_current_month) return `any day from ${fmtDayMonth(regularizeNormalMinDate(tenant))} to today`;
   const n = regularizeWindowDays(tenant);
   return n === 1 ? 'today' : n === 2 ? 'today or yesterday' : `the last ${n} days`;
 };
@@ -177,7 +191,8 @@ export const regularizeExtensionNotice = (tenant: any) => {
   if (!ext) return null;
   const month = new Date(ext.from + 'T00:00:00').toLocaleDateString('en-IN', { month: 'long' });
   const n = regularizeWindowDays(tenant);
-  return `Until ${fmtDayMonth(ext.until)}, you can regularize any day from ${fmtDayMonth(ext.from)} — please submit all your ${month} mispunch / attendance corrections for approval now. After ${fmtDayMonth(ext.until)}, only the last ${n} days can be regularized; older days can no longer be regularized.`;
+  const after = tenant?.regularize_current_month ? 'only days of the current month' : `only the last ${n} days`;
+  return `Until ${fmtDayMonth(ext.until)}, you can regularize any day from ${fmtDayMonth(ext.from)} — please submit all your ${month} mispunch / attendance corrections for approval now. After ${fmtDayMonth(ext.until)}, ${after} can be regularized; older days can no longer be regularized.`;
 };
 
 export const timeStr = (d: Date) =>

@@ -2,6 +2,7 @@ import * as Notifications from 'expo-notifications';
 import { router } from 'expo-router';
 import { Linking } from 'react-native';
 import { STORE_DEEP_LINK, STORE_URL } from '@/services/appUpdateService';
+import { approvalRouteForNotification } from '@/lib/approvals';
 
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
@@ -78,7 +79,10 @@ export function initNotificationResponseListener() {
       Linking.openURL(STORE_DEEP_LINK).catch(() => Linking.openURL(STORE_URL).catch(() => {}));
       return;
     }
-    const route = type ? ROUTE_BY_TYPE[type] : undefined;
+    // A pushed team request (push-app-notification sends type + link_key)
+    // opens the approver's inbox on that request type.
+    const linkKey = response.notification.request.content.data?.link_key as string | undefined;
+    const route = approvalRouteForNotification({ type, link_key: linkKey }) || (type ? ROUTE_BY_TYPE[type] : undefined);
     if (route) goTo(route);
   });
   return () => subscription.remove();

@@ -7,14 +7,16 @@ import { useFocusEffect } from '@react-navigation/native';
 import { useAuth } from '@/context/AuthContext';
 import { useFeatures } from '@/context/FeatureContext';
 import { fetchMyAdvanceBalance } from '@/services/advanceService';
-import { listMySettlements } from '@/services/compOffService';
-import { fmt, fmtDate, monthLabel } from '@/lib/helpers';
+import { listMySettlements, fetchMyCompOffBalance } from '@/services/compOffService';
+import { fmt, fmtDate, monthLabel, isRaniwalaTenant } from '@/lib/helpers';
 import { Colors as C } from '@/constants/Colors';
 import { MORE_TOOLS } from '@/constants/MoreTools';
 
 export default function MoreScreen() {
   const router = useRouter();
-  const { profile } = useAuth();
+  const { profile, tenant } = useAuth();
+  // Raniwala: just the current comp-off balance — no settlement history.
+  const raniwala = isRaniwalaTenant(tenant);
   const { isEnabled } = useFeatures();
   const visibleTools = MORE_TOOLS.filter((t) => isEnabled(t.featureKey));
   const showAdvanceCard = isEnabled('advances_loans');
@@ -23,16 +25,19 @@ export default function MoreScreen() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
+  const [freshCompOff, setFreshCompOff] = useState<number | null>(null);
 
   const fetchData = useCallback(async () => {
     if (!profile) return;
-    const [advRes, settleRes] = await Promise.all([
+    const [advRes, settleRes, compOffRes] = await Promise.all([
       fetchMyAdvanceBalance(profile.id),
-      listMySettlements(profile.id),
+      raniwala ? null : listMySettlements(profile.id),
+      raniwala ? fetchMyCompOffBalance(profile.id) : null,
     ]);
     setAdvanceBalance(advRes.total || 0);
-    if (!settleRes.error) setSettlements(settleRes.data.slice(0, 6));
-  }, [profile]);
+    if (settleRes && !settleRes.error) setSettlements(settleRes.data.slice(0, 6));
+    if (compOffRes?.balance != null) setFreshCompOff(compOffRes.balance);
+  }, [profile, raniwala]);
 
   useFocusEffect(useCallback(() => { setLoading(true); fetchData().finally(() => setLoading(false)); }, [fetchData]));
 
@@ -66,17 +71,17 @@ export default function MoreScreen() {
                 <Text style={s.statVal}>{fmt(advanceBalance)}</Text>
               </View>
             )}
-            <TouchableOpacity style={s.statCard} onPress={() => setShowHistory((v) => !v)} activeOpacity={0.85}>
+            <TouchableOpacity style={s.statCard} onPress={() => setShowHistory((v) => !v)} disabled={raniwala} activeOpacity={0.85}>
               <View style={[s.statIconWrap, { backgroundColor: C.tealBg }]}>
                 <Ionicons name="swap-horizontal-outline" size={18} color={C.teal} />
               </View>
               <Text style={s.statLabel}>Comp-Off Balance</Text>
-              <Text style={s.statVal}>{profile?.comp_off_balance || 0}</Text>
+              <Text style={s.statVal}>{freshCompOff ?? (profile?.comp_off_balance || 0)}</Text>
             </TouchableOpacity>
           </View>
         )}
 
-        {showHistory && (
+        {showHistory && !raniwala && (
           <View style={s.historyCard}>
             <Text style={s.historyTitle}>Comp-Off Settlement History</Text>
             {settlements.length === 0 ? (

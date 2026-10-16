@@ -7,13 +7,14 @@ import React, { useEffect, useRef, useState } from 'react';
 import { View, Text, TextInput, TouchableOpacity, Alert, Animated, StyleSheet, Easing, Image, Dimensions } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Font from 'expo-font';
-import {
-  Outfit_400Regular,
-  Outfit_500Medium,
-  Outfit_600SemiBold,
-  Outfit_700Bold,
-  Outfit_800ExtraBold,
-} from '@expo-google-fonts/outfit';
+// Inter — the website's font (index.html loads Inter from Google Fonts), so
+// the app and the web read the same.
+// Only the five weights the app uses — the package index would bundle all 18.
+const Inter_400Regular = require('@expo-google-fonts/inter/400Regular/Inter_400Regular.ttf');
+const Inter_500Medium = require('@expo-google-fonts/inter/500Medium/Inter_500Medium.ttf');
+const Inter_600SemiBold = require('@expo-google-fonts/inter/600SemiBold/Inter_600SemiBold.ttf');
+const Inter_700Bold = require('@expo-google-fonts/inter/700Bold/Inter_700Bold.ttf');
+const Inter_800ExtraBold = require('@expo-google-fonts/inter/800ExtraBold/Inter_800ExtraBold.ttf');
 import { Stack, useRootNavigationState } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { Ionicons } from '@expo/vector-icons';
@@ -21,6 +22,7 @@ import * as SplashScreen from 'expo-splash-screen';
 import { Colors } from '@/constants/Colors';
 import { AuthProvider } from '@/context/AuthContext';
 import { FeatureProvider } from '@/context/FeatureContext';
+import { ApprovalsProvider } from '@/context/ApprovalsContext';
 import { ToastProvider } from '@/components/Toast';
 import ForcePasswordChange from '@/components/ForcePasswordChange';
 import LocationConsentGate from '@/components/LocationConsentGate';
@@ -156,24 +158,24 @@ class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { has
 // Global Font Override Helper
 function configureGlobalFont() {
   const customFontMap: Record<string, string> = {
-    '100': 'Outfit-Regular',
-    '200': 'Outfit-Regular',
-    '300': 'Outfit-Regular',
-    '400': 'Outfit-Regular',
-    '500': 'Outfit-Medium',
-    '600': 'Outfit-SemiBold',
-    '700': 'Outfit-Bold',
-    '800': 'Outfit-ExtraBold',
-    '900': 'Outfit-ExtraBold',
-    normal: 'Outfit-Regular',
-    bold: 'Outfit-Bold',
+    '100': 'Inter-Regular',
+    '200': 'Inter-Regular',
+    '300': 'Inter-Regular',
+    '400': 'Inter-Regular',
+    '500': 'Inter-Medium',
+    '600': 'Inter-SemiBold',
+    '700': 'Inter-Bold',
+    '800': 'Inter-ExtraBold',
+    '900': 'Inter-ExtraBold',
+    normal: 'Inter-Regular',
+    bold: 'Inter-Bold',
   };
 
   const overrideStyle = (style: any) => {
-    if (!style) return { fontFamily: 'Outfit-Regular' };
+    if (!style) return { fontFamily: 'Inter-Regular' };
     const flat = StyleSheet.flatten(style);
     const weight = flat.fontWeight || 'normal';
-    const resolvedFont = customFontMap[String(weight)] || 'Outfit-Regular';
+    const resolvedFont = customFontMap[String(weight)] || 'Inter-Regular';
     return { fontFamily: resolvedFont };
   };
 
@@ -215,11 +217,11 @@ export default function RootLayout() {
     async function loadFonts() {
       try {
         await Font.loadAsync({
-          'Outfit-Regular': Outfit_400Regular,
-          'Outfit-Medium': Outfit_500Medium,
-          'Outfit-SemiBold': Outfit_600SemiBold,
-          'Outfit-Bold': Outfit_700Bold,
-          'Outfit-ExtraBold': Outfit_800ExtraBold,
+          'Inter-Regular': Inter_400Regular,
+          'Inter-Medium': Inter_500Medium,
+          'Inter-SemiBold': Inter_600SemiBold,
+          'Inter-Bold': Inter_700Bold,
+          'Inter-ExtraBold': Inter_800ExtraBold,
         });
         configureGlobalFont();
         setFontsLoaded(true);
@@ -244,17 +246,19 @@ export default function RootLayout() {
     <ErrorBoundary>
       <AuthProvider>
         <FeatureProvider>
-          <ToastProvider>
-            <StatusBar style="light" />
-            <Stack screenOptions={{ headerShown: false }}>
-              <Stack.Screen name="(auth)" />
-              <Stack.Screen name="(tabs)" />
-            </Stack>
-            <ForcePasswordChange />
-            <LocationConsentGate />
-            {splashDone && <AppUpdatePrompt />}
-            {!splashDone && <SplashOverlay onDone={() => setSplashDone(true)} />}
-          </ToastProvider>
+          <ApprovalsProvider>
+            <ToastProvider>
+              <StatusBar style="light" />
+              <Stack screenOptions={{ headerShown: false }}>
+                <Stack.Screen name="(auth)" />
+                <Stack.Screen name="(tabs)" />
+              </Stack>
+              <ForcePasswordChange />
+              <LocationConsentGate />
+              {splashDone && <AppUpdatePrompt />}
+              {!splashDone && <SplashOverlay onDone={() => setSplashDone(true)} />}
+            </ToastProvider>
+          </ApprovalsProvider>
         </FeatureProvider>
       </AuthProvider>
     </ErrorBoundary>

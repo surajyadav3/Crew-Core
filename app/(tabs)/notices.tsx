@@ -9,6 +9,8 @@ import { useRouter, useLocalSearchParams } from 'expo-router';
 import * as WebBrowser from 'expo-web-browser';
 import { useAuth } from '@/context/AuthContext';
 import { useFeatures } from '@/context/FeatureContext';
+import { useApprovals } from '@/context/ApprovalsContext';
+import { approvalRouteForNotification } from '@/lib/approvals';
 import { useForegroundRefresh } from '@/hooks/useForegroundRefresh';
 import {
   listPolicies, createPolicy, acknowledgePolicy, listMyPolicyAcks, logPolicyDownload, listPolicyAckCounts, listPolicyAcks,
@@ -17,6 +19,7 @@ import { downloadToDevice } from '@/lib/downloadFile';
 import { listAnnouncements, createAnnouncement } from '@/services/announcementService';
 import { listMyNotifications, markNotificationRead } from '@/services/notificationService';
 import { showToast } from '@/components/Toast';
+import PageHeader from '@/components/PageHeader';
 import { fmtDate, fmtDateTime, personName } from '@/lib/helpers';
 import { Colors as C } from '@/constants/Colors';
 
@@ -42,6 +45,7 @@ export default function NoticesScreen() {
   const router = useRouter();
   const { profile, tenant } = useAuth();
   const { isEnabled } = useFeatures();
+  const { isApprover } = useApprovals();
   const canPost = profile?.role === 'admin' || profile?.role === 'superadmin';
 
   // 'alerts' isn't a toggleable feature on web (it's CrewCore's own notification
@@ -178,7 +182,10 @@ export default function NoticesScreen() {
       await markNotificationRead(n.id);
       setNotifications((prev) => prev.map((x) => (x.id === n.id ? { ...x, is_read: true } : x)));
     }
-    if (n.type === 'verification_request_submitted') router.push('/team-verification' as any);
+    // A team request (new leave, punch, regularize…) opens the approvals inbox on its tab.
+    const approvalRoute = isApprover ? approvalRouteForNotification(n) : null;
+    if (approvalRoute) router.push(approvalRoute as any);
+    else if (n.type === 'verification_request_submitted') router.push('/team-verification' as any);
   };
 
   const list = segment === 'policies' ? policies : segment === 'announcements' ? announcements : notifications;
@@ -186,18 +193,20 @@ export default function NoticesScreen() {
 
   return (
     <SafeAreaView style={s.safe} edges={['top']}>
-      <View style={s.header}>
-        <View>
-          <Text style={s.title}>Notices</Text>
-          <Text style={s.subtitle}>Policies, announcements & alerts</Text>
-        </View>
-        {canPost && segment !== 'alerts' && (
-          <TouchableOpacity style={s.addBtn} onPress={() => setShowModal(true)} activeOpacity={0.85}>
-            <Ionicons name="add" size={20} color="#fff" />
-            <Text style={s.addBtnText}>New</Text>
-          </TouchableOpacity>
+      <PageHeader
+        title="Notices"
+        subtitle='Policies, announcements & alerts'
+        right={(
+          <>
+          {canPost && segment !== 'alerts' && (
+            <TouchableOpacity style={s.addBtn} onPress={() => setShowModal(true)} activeOpacity={0.85}>
+              <Ionicons name="add" size={20} color="#fff" />
+              <Text style={s.addBtnText}>New</Text>
+            </TouchableOpacity>
+          )}
+          </>
         )}
-      </View>
+      />
 
       <View style={s.segmentRow}>
         {visibleSegments.map((seg) => (
@@ -420,7 +429,7 @@ export default function NoticesScreen() {
 }
 
 const s = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: C.dark },
+  safe: { flex: 1, backgroundColor: C.surface },
   scroll: { flex: 1, backgroundColor: C.bg },
   header: {
     flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
@@ -430,10 +439,9 @@ const s = StyleSheet.create({
   subtitle: { fontSize: 13, color: 'rgba(255,255,255,0.4)', marginTop: 2 },
   addBtn: {
     flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: C.primary,
-    paddingHorizontal: 16, paddingVertical: 10, borderRadius: 14,
-    shadowColor: C.primary, shadowOpacity: 0.4, shadowRadius: 10, elevation: 5,
+    paddingHorizontal: 14, paddingVertical: 9, borderRadius: 10,
   },
-  addBtnText: { color: '#fff', fontSize: 14, fontWeight: '700' },
+  addBtnText: { color: '#fff', fontSize: 13.5, fontWeight: '700' },
   segmentRow: {
     flexDirection: 'row', gap: 8, paddingHorizontal: 16, paddingVertical: 12, backgroundColor: C.bg,
   },
